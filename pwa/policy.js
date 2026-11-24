@@ -1,4 +1,5 @@
 export const defaults = Object.freeze({
+mainMinLiquidity:8000,sniperMinLiquidity:2500,mainMinVolume24:10000,sniperMinVolume24:10000,mainMinVolume5:0,sniperMinVolume5:0,mainMinAge:5,sniperMinAge:0,mainMaxAge:0,sniperMaxAge:0,mainMinTrades:4,sniperMinTrades:3,mainMinTradesHour:5,sniperMinTradesHour:5,mainMinPressure:52,sniperMinPressure:52,mainMinChange5:0,sniperMinChange5:0,mainMaxChange5:8,sniperMaxChange5:8,mainMinChange1h:-25,sniperMinChange1h:-25,mainMaxChange1h:35,sniperMaxChange1h:35,mainMinChange24:-70,sniperMinChange24:-70,mainMaxVolumeRatio:15,sniperMaxVolumeRatio:15,mainMinScore:70,sniperMinScore:75,mainMinSources:1,sniperMinSources:1,mainMaxImpact:5,sniperMaxImpact:5,
 mainOrderUsd: 5, mainStop: 9, mainProfit: 8, mainProfitShare: 50, mainFinalProfit: 10, mainTrailing: 3.5, mainBreakEven: 0, mainHoldMinutes: 15, mainDca: 0, mainDcaDrop: 5, sniperOrderUsd: 5, sniperStop: 9, sniperProfit: 8, sniperProfitShare: 50, sniperFinalProfit: 10, sniperTrailing: 3.5, sniperBreakEven: 0, sniperHoldMinutes: 15, sniperDca: 0, sniperDcaDrop: 5,
 
   analysisWorkers: 24, maxMainPositions: 10, maxSniperPositions: 10, maxTotalPositions: 15, balanceFraction: 10, dcaDrop: 3,
@@ -8,6 +9,7 @@ mainOrderUsd: 5, mainStop: 9, mainProfit: 8, mainProfitShare: 50, mainFinalProfi
 });
 
 const limits = {
+mainMinLiquidity:[0,1000000000],sniperMinLiquidity:[0,1000000000],mainMinVolume24:[0,1000000000],sniperMinVolume24:[0,1000000000],mainMinVolume5:[0,1000000000],sniperMinVolume5:[0,1000000000],mainMinAge:[0,10000000],sniperMinAge:[0,10000000],mainMaxAge:[0,10000000],sniperMaxAge:[0,10000000],mainMinTrades:[0,1000000],sniperMinTrades:[0,1000000],mainMinTradesHour:[0,1000000],sniperMinTradesHour:[0,1000000],mainMinPressure:[0,100],sniperMinPressure:[0,100],mainMinChange5:[-100,100000],sniperMinChange5:[-100,100000],mainMaxChange5:[-100,100000],sniperMaxChange5:[-100,100000],mainMinChange1h:[-100,100000],sniperMinChange1h:[-100,100000],mainMaxChange1h:[-100,100000],sniperMaxChange1h:[-100,100000],mainMinChange24:[-100,100000],sniperMinChange24:[-100,100000],mainMaxVolumeRatio:[0,1000000],sniperMaxVolumeRatio:[0,1000000],mainMinScore:[0,100],sniperMinScore:[0,100],mainMinSources:[0,30],sniperMinSources:[0,30],mainMaxImpact:[0,100],sniperMaxImpact:[0,100],
 mainOrderUsd: [1,500], mainStop: [0.1,50], mainProfit: [0.1,500], mainProfitShare: [1,100], mainFinalProfit: [0.1,500], mainTrailing: [0,50], mainBreakEven: [0,100], mainHoldMinutes: [1,1440], mainDca: [0,1], mainDcaDrop: [0.1,49], sniperOrderUsd: [1,500], sniperStop: [0.1,50], sniperProfit: [0.1,500], sniperProfitShare: [1,100], sniperFinalProfit: [0.1,500], sniperTrailing: [0,50], sniperBreakEven: [0,100], sniperHoldMinutes: [1,1440], sniperDca: [0,1], sniperDcaDrop: [0.1,49],
 
   analysisWorkers: [1,24], maxMainPositions: [1,30], maxSniperPositions: [1,30], maxTotalPositions: [1,30], balanceFraction: [1,100], dcaDrop: [0.1,49],
@@ -33,6 +35,7 @@ export function validateSettings(input) {
   }
   for (const p of ['main','sniper']) {
     const s = strategySettings(settings, p === 'main' ? 5 : 6);
+    if (settings[p+"MinChange5"]>settings[p+"MaxChange5"] || settings[p+"MinChange1h"]>settings[p+"MaxChange1h"] || (settings[p+"MaxAge"] && settings[p+"MinAge"]>settings[p+"MaxAge"])) throw new Error("Virheelliset hakurajat "+p);
     if (!Number.isInteger(s.dca) || (s.dca && s.dcaDrop >= s.stop) || s.orderUsd > s.exposureUsd || (s.profitShare < 100 && s.finalProfit <= s.profit)) throw new Error('Virheelliset '+p+'-asetukset');
   }
   return settings;
@@ -42,7 +45,7 @@ export function strategySettings(policy, strategy) {
   if (strategy !== 5 && strategy !== 6) return policy;
   const prefix = strategy === 5 ? 'main' : 'sniper';
   const result = {...policy, trojanExit: true};
-  for (const name of ["orderUsd","stop","profit","profitShare","finalProfit","trailing","breakEven","holdMinutes","dca","dcaDrop"]) { const k = prefix + name[0].toUpperCase() + name.slice(1); result[name] = policy[k] ?? policy[name]; }
+  for (const name of ["orderUsd","stop","profit","profitShare","finalProfit","trailing","breakEven","holdMinutes","dca","dcaDrop","minLiquidity"]) { const k = prefix + name[0].toUpperCase() + name.slice(1); result[name] = policy[k] ?? policy[name]; }
   return result;
 }
 
