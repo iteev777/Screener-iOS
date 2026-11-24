@@ -1,10 +1,12 @@
 export const defaults = Object.freeze({
+  maxMainPositions: 10, maxSniperPositions: 10, maxTotalPositions: 15, balanceFraction: 10, dcaDrop: 5,
   strategy: 0, orderUsd: 100, exposureUsd: 200, lossUsd: 50, stop: 5, profit: 10, profitShare: 100, finalProfit: 20,
   trailing: 5, breakEven: 5, holdMinutes: 240, cooldownSeconds: 60,
   feeBps: 20, slippageBps: 15, dca: 0, interval: 30, minLiquidity: 10000, rugScore: 0, maxPools: 12, maxDailyBuys: 20, scanMinVolume: 10000
 });
 
 const limits = {
+  maxMainPositions: [1,30], maxSniperPositions: [1,30], maxTotalPositions: [1,30], balanceFraction: [1,100], dcaDrop: [0.1,49],
   strategy: [0, 6], orderUsd: [1, 500], exposureUsd: [1, 1000], lossUsd: [1, 1000],
   stop: [0.1, 50], profit: [0.1, 500], profitShare: [1, 100], finalProfit: [0.1, 500], trailing: [0, 50], breakEven: [0, 100],
   holdMinutes: [1, 1440], cooldownSeconds: [0, 3600], feeBps: [0, 500],
@@ -20,7 +22,7 @@ export function validateSettings(input) {
     }
     settings[name] = value;
   }
-  if (![settings.strategy, settings.dca, settings.maxPools, settings.maxDailyBuys].every(Number.isInteger) ||
+  if (![settings.strategy, settings.dca, settings.maxPools, settings.maxDailyBuys, settings.maxMainPositions, settings.maxSniperPositions, settings.maxTotalPositions].every(Number.isInteger) ||
       settings.orderUsd > settings.exposureUsd ||
       (settings.profitShare < 100 && settings.finalProfit <= settings.profit)) {
     throw new Error("Tarkista strategia, lisäostot, enimmäispositio ja voittotavoitteiden järjestys.");
@@ -48,7 +50,7 @@ export function orderFor(engine, signal, book, tick, settings) {
   const loss = book.lossDay === day ? book.lossToday ?? 0 : 0;
   const buys = book.buyDay === day ? book.buysToday ?? 0 : 0;
   const dca = held && settings.dca && !book.added && !book.profitTaken && signal === 1 &&
-    price <= (book.cost / book.sol) * 0.98;
+    price <= (book.cost / book.sol) * (1 - settings.dcaDrop / 100) && price > (book.cost / book.sol) * (1 - settings.stop / 100);
   if (((!held && signal === 1) || dca) && loss < settings.lossUsd &&
       buys < settings.maxDailyBuys &&
       liquidity >= settings.minLiquidity &&
