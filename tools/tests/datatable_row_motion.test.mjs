@@ -148,8 +148,8 @@ test("a row that leaves fades in place, then the rows below close its gap", asyn
 
   await page.evaluate(() => {
     window.__leavingSnapshot = null;
-    const animate = Element.prototype.animate;
-    Element.prototype.animate = function (...args) {
+    const animate = window.Element.prototype.animate;
+    window.Element.prototype.animate = function (...args) {
       if (this.matches('#positions-root tr[data-dt-leaving-id="101"]')) {
         window.__leavingSnapshot = {
           ids: [...this.parentElement.children].map(tr => tr.getAttribute("data-row-id") ?? "leaving:" + tr.getAttribute("data-dt-leaving-id")),
