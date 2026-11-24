@@ -64,3 +64,11 @@ GitHub Actionsin **Build static Screener PWA** -työnkulku tekee vastaavan paket
 DEX Screener vaatii selain-Originille sopivan GET-vastauksen, RPC JSON POST vaatii myös onnistuneen OPTIONS-esipyynnön ja WebSocket-palvelin voi rajoittaa Originia. Tarkista kaikki kolme lopullisesta HTTPS-osoitteesta. Suorien HTTP-kokeiden uusinnassa DEX Screener ja GeckoTerminal sallivat julkisen Originin. PublicNode sallii myös JSON-esipyynnön. Chromiumin ulkoinen koe pysähtyi pilven proxyn varmenteeseen. Lopullista HTTPS-julkaisua ei ole vielä testattu iPhonella. Staattinen hostaus voi olla maksuton. Solana mainnet -transaktioilla on verkkomaksuja.
 
 [GitHub Pagesin saatavuus](https://docs.github.com/en/pages/getting-started-with-github-pages/about-github-pages) · [Applen asennusohje](https://support.apple.com/guide/iphone/bookmark-a-website-iph42ab2f3a7/ios) · [BUSL-1.1](LICENSE)
+
+### Trojan V2 Main ja Sniper
+
+Valitse strategia riskiasetuksista ja paina **Käynnistä Paper-skannaus**. Main käyttää REST-lähteiden ja PumpPortalin löydöksiä. Sniper hyväksyy analysoitaviksi kaupankäyntiehdokkaiksi vain PumpPortalin havaitsemat mintit. Molemmat käyttävät Trojan V2:n dip-reversal-pisteytystä sekä Screenerin Paper-salkun asetettuja likviditeetti-, volyymi-, pääoma- ja tappiorajoja. Trojan-profiilit vaativat lisäksi minttitarkistuksen ja RugCheck-yhteenvedon. Kun oma RugCheck-enimmäispistemäärä on 0, Trojan-profiilit käyttävät rajaa 30.
+
+Löytöjono käsittelee enintään 600 aktiivista minttiä ja analyysi enintään 30 minttiä per erä. Dashboardin pooliraja vaikuttaa kaupankäyntiseurantaan. Lähteet päivittyvät 15–60 sekunnin välein ja avoimien positioiden hinnat normaalisti noin kolmessa sekunnissa. Puuttuvien tietojen ensimmäiset uudelleenhaut odottavat 10 sekuntia. Analyysitilastot ovat ajokohtaisia. Birdeyen avain on valinnainen ja säilyy vain ajon muistissa.
+
+Mainin ja Sniperin selainportti käyttää alkuperäisiä pisteytysrajoja ja yhden aikavälin teknistä vahvistusta, kun kelvollista OHLCV-dataa on saatavilla. Alkuperäisen Trojan V2:n Jupiter-ostoanalyysi, ketjukohtaiset poolidekooderit, koko RugCheck-raportin haltija- ja LP-analyysi, moniaikavälisuodatus ja natiivi Live-toteutus jäivät selainportin ulkopuolelle. Nykyiset Screenerin Paper-simulaatio, poistumissäännöt ja riskirajat ovat käytössä.

@@ -12,7 +12,7 @@ const fresh = () => ({ sol: 0, cash: 1000, trades: [] });
 
 test("validates persisted settings and caps exposure", () => {
   assert.equal(validateSettings({ strategy: 2 }).strategy, 2);
-  for (const variant of [{ strategy: 5 }, { orderUsd: Infinity }, { orderUsd: 200, exposureUsd: 99 }]) {
+  for (const variant of [{ strategy: 7 }, { orderUsd: Infinity }, { orderUsd: 200, exposureUsd: 99 }]) {
     assert.throws(() => validateSettings(variant));
   }
 });

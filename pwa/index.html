@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#111726">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://api.dexscreener.com https://api.geckoterminal.com https://api.jup.ag https://api.rugcheck.xyz https://api.mainnet-beta.solana.com https://solana-rpc.publicnode.com https://api.devnet.solana.com wss://api.mainnet-beta.solana.com wss://solana-rpc.publicnode.com; object-src 'none'; base-uri 'none'; form-action 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' wss://pumpportal.fun https://public-api.birdeye.so https://api.dexscreener.com https://api.geckoterminal.com https://api.jup.ag https://api.rugcheck.xyz https://api.mainnet-beta.solana.com https://solana-rpc.publicnode.com https://api.devnet.solana.com wss://api.mainnet-beta.solana.com wss://solana-rpc.publicnode.com; object-src 'none'; base-uri 'none'; form-action 'self'">
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./icon-192.png">
 <link rel="stylesheet" href="./style.css">
@@ -49,7 +49,10 @@
 </div><p id="devnet-status" role="status"></p><p id="devnet-history"></p>
 </details>
 <details id="scan-panel"><summary>Automaattinen Paper-salkku</summary>
-<p id="scan-status" role="status"></p><p id="scan-balance"></p>
+<p id="scan-status" role="status"></p>
+<p id="scan-counts">Löydetyt 0 · Analysoidut 0 · Hylätyt 0 · Hyväksytyt 0</p>
+<p id="scan-queue">Jono 0 · Uudelleenhaku 0</p>
+<label>Birdeye API-avain (valinnainen)<input id="birdeye-key" type="password" autocomplete="off" maxlength="256"></label><p id="scan-balance"></p>
 <h2>Seuratut markkinat</h2><ul id="scan-markets"></ul>
 <h2>Avoimet skannauspositiot</h2><ul id="scan-positions"></ul>
 <h2>Skannauksen kaupat</h2><ol id="scan-trades"></ol></details>
@@ -57,7 +60,7 @@
 <details><summary>Strategia ja riskirajat</summary>
 <form id="settings">
 <fieldset id="settings-fields" disabled>
-<label>Strategia<select name="strategy"><option value="0">RSI</option><option value="1">EMA-risteys</option><option value="2">Hintamurto</option><option value="3">Oma ehtopuu</option><option value="4">Copy Trading (Paper)</option></select></label>
+<label>Strategia<select name="strategy"><option value="0">RSI</option><option value="1">EMA-risteys</option><option value="2">Hintamurto</option><option value="3">Oma ehtopuu</option><option value="4">Copy Trading (Paper)</option><option value="5">Trojan V2 Main</option><option value="6">Trojan V2 Sniper</option></select></label>
 <label>Oston koko, USD<input name="orderUsd" type="number" step="any" required></label>
 <label>Positioraja, USD<input name="exposureUsd" type="number" step="any" required></label>
 <label>Tappioraja / UTC-päivä, USD<input name="lossUsd" type="number" step="any" required></label>
