@@ -105,8 +105,8 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
       const book = { sol: 0, cost: 0, ...position, cash: portfolio.cash, realized: portfolio.realized,
         lossToday: portfolio.lossToday, lossDay: portfolio.lossDay, buyDay: portfolio.buyDay, buysToday: portfolio.buysToday, trades: [], count: 0 };
       const trojan = policy.strategy >= 5;
-      const orderUsd = trojan ? Math.round(Math.min(5, policy.orderUsd, book.cash * .1) * 100) / 100 : policy.orderUsd;
-      const executionPolicy = trojan ? { ...policy, orderUsd, lossUsd: Math.min(50, policy.lossUsd) } : policy;
+      const orderUsd = trojan ? Math.round(Math.min(policy.orderUsd, book.cash * (policy.balanceFraction ?? 10) / 100) * 100) / 100 : policy.orderUsd;
+      const executionPolicy = trojan ? { ...policy, orderUsd, lossUsd: policy.lossUsd } : policy;
       const order = orderFor(engine, decide(tick, book), book, tick, executionPolicy);
       if (exits && order?.side !== "Myynti") continue;
       if (!exits && order?.side === "Myynti") continue;
@@ -116,7 +116,7 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
       const positions = Object.values(portfolio.positions);
       const profileCount = trojan ? positions.filter(item => item.strategy === policy.strategy).length : 0;
       const profileAllowed = !trojan || (orderUsd >= 1 &&
-        Boolean(position || (positions.length < 15 && profileCount < 10)));
+        Boolean(position || (positions.length < (policy.maxTotalPositions ?? 15) && profileCount < (policy.strategy === 6 ? policy.maxSniperPositions ?? 10 : policy.maxMainPositions ?? 10))));
       const buyAllowed = profileAllowed && eligible(tick.token) && Number.isFinite(tick.volume) && tick.volume >= (policy.scanMinVolume ?? 10000) && !duplicate &&
         (position || Object.keys(portfolio.positions).length < (policy.maxPools ?? scanLimit)) &&
         exposure + orderUsd <= policy.exposureUsd;
@@ -331,7 +331,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
                 routeCache.set(positionKey(market), { ...pool, expires: Date.now() + 30000 });
               } else {
                 if (!solQuote || Date.now() - solQuote.at > 15000) solQuote = await currentMarket(signal);
-                const route = await analyzeEntryRoute(market.token, Math.min(5, policy.orderUsd), {
+                const route = await analyzeEntryRoute(market.token, policy.orderUsd, {
                   signal, solUsd: solQuote.price, apiKey: jupiterKey, taker: simulationWallet || undefined,
                   slippageBps: 100
                 });
