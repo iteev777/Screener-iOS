@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
-import { discoverMarkets, fetchCandles, searchMarkets } from "./markets.js";
+import { fetchJson } from "./network.js";
+import { normalizePair, discoverMarkets, fetchCandles, searchMarkets } from "./markets.js";
 
 export function mountMarkets({ selection, select }) {
   const form = document.getElementById("market-search");
@@ -8,6 +9,19 @@ export function mountMarkets({ selection, select }) {
   const candleStatus = document.getElementById("candle-status");
   let candlesRequest;
   let inspected;
+  let detailRequest;
+  const risk = document.getElementById("token-risk");
+  const pools = document.getElementById("token-pools");
+  function clearDetails(){detailRequest?.abort();risk.textContent="";pools.replaceChildren();}
+  document.getElementById("token-security").onclick=async()=>{
+    const target=inspected ?? selection(); if(!target?.token)return;
+    clearDetails();const request=new AbortController();detailRequest=request;
+    risk.textContent="Haetaan turvallisuusraporttia…";
+    await Promise.allSettled([
+      (async()=>{try{const report=await fetchJson(`https://api.rugcheck.xyz/v1/tokens/${target.token}/report`,{},request.signal);if(request.signal.aborted)return;const score=report.score_normalised??report.score;const risks=Array.isArray(report.risks)?report.risks.map(r=>`${r.level??""} ${r.name??""}`).join(" · "):"Ei riskilistaa";risk.textContent=`RugCheck-pisteet: ${score??"Ei saatavilla"} · ${risks}`;}catch(e){if(!request.signal.aborted)risk.textContent=`Raporttia ei saatu: ${e.message}`;}})(),
+      (async()=>{try{const data=await fetchJson(`https://api.dexscreener.com/token-pairs/v1/solana/${target.token}`,{},request.signal);if(request.signal.aborted)return;const rows=(Array.isArray(data)?data:[]).map(normalizePair).filter(p=>p?.token===target.token).sort((a,b)=>b.liquidity-a.liquidity).slice(0,20);pools.replaceChildren(...rows.map(p=>{const li=document.createElement("li");const b=document.createElement("button");b.type="button";b.className="secondary";b.textContent=`${p.pool.slice(0,8)}… · USD ${p.price} · likviditeetti ${p.liquidity.toLocaleString("fi-FI")}`;b.onclick=()=>{inspected=p;document.getElementById("token-detail-data").textContent=`Mint ${p.token} · Pool ${p.pool} · USD ${p.price}`;document.getElementById("load-candles").click();};li.append(b);return li;}));if(!rows.length)pools.textContent="Ei kelvollisia pooleja.";}catch(e){if(!request.signal.aborted)pools.textContent=`Poolihaku epäonnistui: ${e.message}`;}})()
+    ]);
+  };
   const canvas = document.getElementById("token-chart");
   function draw(data) {
     const ctx=canvas.getContext("2d"); if(!ctx)return;
@@ -42,13 +56,14 @@ export function mountMarkets({ selection, select }) {
             status.textContent = `Valittu ${market.symbol || market.token}.`;
             candleStatus.textContent = "";
             document.getElementById("candles").replaceChildren();
+            clearDetails();
             inspected = market;
             draw([]);
             candlesRequest?.abort();
           }
         }).catch(error => { status.textContent = error.message; });
         const inspect=document.createElement("button"); inspect.type="button"; inspect.className="secondary"; inspect.textContent="Tiedot";
-        inspect.onclick=()=>{ inspected=market; candlesRequest?.abort(); draw([]); document.getElementById("chart-range").textContent=""; document.getElementById("token-detail-title").textContent=market.symbol||market.token; document.getElementById("token-detail-data").textContent=`Mint ${market.token} · Pool ${market.pool} · Hinta ${market.price} · Likviditeetti ${market.liquidity} · Volyymi 24h ${market.volume??"—"} · Muutos 24h ${market.change??"—"} %`; document.getElementById("load-candles").click(); };
+        inspect.onclick=()=>{ clearDetails(); inspected=market; candlesRequest?.abort(); draw([]); document.getElementById("chart-range").textContent=""; document.getElementById("token-detail-title").textContent=market.symbol||market.token; document.getElementById("token-detail-data").textContent=`Mint ${market.token} · Pool ${market.pool} · Hinta ${market.price} · Likviditeetti ${market.liquidity} · Volyymi 24h ${market.volume??"—"} · Muutos 24h ${market.change??"—"} %`; document.getElementById("load-candles").click(); };
         row.append(choose,inspect);
         rows.append(row);
       }
@@ -59,6 +74,7 @@ export function mountMarkets({ selection, select }) {
       for (const button of submitters) button.disabled = false;
     }
   };
+  document.getElementById("chart-timeframe").onchange=()=>document.getElementById("load-candles").click();
   document.getElementById("load-candles").onclick = async () => {
     candlesRequest?.abort();
     const request = new AbortController();
