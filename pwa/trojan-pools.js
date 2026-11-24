@@ -107,7 +107,9 @@ export async function verifyPoolReserves(market, signal) {
   if (decoded.status !== "decoded" || !decoded.baseVault || !decoded.quoteVault || !decoded.base || !decoded.quote) return { status:"watch", reason:"Reservirakenne ei ole tuettu" };
   const keys = [decoded.baseVault, decoded.quoteVault, decoded.base, decoded.quote].map(encodeKey);
   const feeKeys = decoded.protocol === "PumpSwap" ? ["ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw","5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"] : decoded.protocol === "Raydium CPMM" ? [encodeKey(accountBytes(account).slice(8,40))] : [];
-  const snapshot = await rpcCall("getMultipleAccounts", [[market.pool, ...keys, ...feeKeys], options], signal);
+  const range = concentratedRange(decoded.protocol,accountBytes(account));
+  const arrayKeys = range ? await rangeAddresses(decoded.protocol,market.pool,account.owner,range) : [];
+  const snapshot = await rpcCall("getMultipleAccounts", [[market.pool, ...keys, ...feeKeys, ...arrayKeys], options], signal);
   const [p, v1, v2, m1, m2, globalConfig, feeConfig] = snapshot?.value ?? [];
   if (p?.owner !== account.owner) throw new Error("Poolin omistaja vaihtui");
   const fresh = decodePool(p.owner, accountBytes(p));
@@ -127,7 +129,9 @@ export async function verifyPoolReserves(market, signal) {
     if (global.length < 321 || !equal(global.subarray(0,8),[149,8,156,202,160,252,176,217])) throw new Error("PumpSwap global config virheellinen");
     pricing.feeBps = decodePumpFees(accountBytes(feeConfig));
   }
-  return { status:"approve", protocol:fresh.protocol, slot:snapshot.context.slot, base, quote, ...pricing, range:concentratedRange(fresh.protocol,accountBytes(p)) };
+  const currentRange=concentratedRange(fresh.protocol,accountBytes(p));
+  const arrays=range ? await inspectArrays(fresh.protocol,market.pool,p.owner,currentRange,range,snapshot.value.slice(5+feeKeys.length),arrayKeys) : null;
+  return { status:"approve", protocol:fresh.protocol, slot:snapshot.context.slot, base, quote, ...pricing, range:currentRange, arrays };
 }
 
 export function poolPricing(protocol, bytes, base, quote) {
@@ -286,4 +290,43 @@ export function concentratedRange(protocol, bytes) {
     return {activeTick:tick,tickSpacing:spacing,arrayStart:start,arrayEnd:start+59*spacing};
   }
   return null;
+}
+
+async function deriveAddress(seeds,program){
+  const suffix=new TextEncoder().encode("ProgramDerivedAddress");
+  const size=seeds.reduce((n,s)=>n+s.length,0);
+  const data=new Uint8Array(size+1+32+suffix.length);
+  let at=0;for(const seed of seeds){data.set(seed,at);at+=seed.length;}
+  data.set(publicKeyBytes(program),size+1);data.set(suffix,size+33);
+  for(let bump=255;bump>=0;bump--){data[size]=bump;const hash=new Uint8Array(await crypto.subtle.digest("SHA-256",data));if(!onCurve(hash))return encodeKey(hash);}
+  throw new Error("Array PDA puuttuu");
+}
+async function rangeAddresses(protocol,pool,program,range){
+  const encoder=new TextEncoder(),key=publicKeyBytes(pool);
+  const indices=protocol==="Meteora DLMM"?[-1,0,1].map(n=>range.arrayIndex+n):[-1,0,1].map(n=>range.arrayStart+n*(protocol==="Orca Whirlpool"?88:60)*range.tickSpacing);
+  return Promise.all(indices.map(i=>{
+    let index;
+    if(protocol==="Orca Whirlpool")index=encoder.encode(String(i));
+    else if(protocol==="Meteora DLMM"){index=new Uint8Array(8);new DataView(index.buffer).setBigInt64(0,BigInt(i),true);}
+    else {index=new Uint8Array(4);new DataView(index.buffer).setInt32(0,i,false);}
+    return deriveAddress([encoder.encode(protocol==="Meteora DLMM"?"bin_array":"tick_array"),key,index],program);
+  }));
+}
+async function inspectArrays(protocol,pool,program,current,previous,accounts,addresses){
+  if(current.arrayStart!==previous.arrayStart||current.arrayIndex!==previous.arrayIndex)throw new Error("Aktiivinen array vaihtui");
+  const name=protocol==="Meteora DLMM"?"BinArray":protocol==="Orca Whirlpool"?"TickArray":"TickArrayState";
+  const discriminator=new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode("account:"+name))).slice(0,8);
+  const key=publicKeyBytes(pool);
+  return accounts.map((a,i)=>{
+    if(!a)return {address:addresses[i],status:"missing"};
+    if(a.owner!==program)throw new Error("Array omistaja virheellinen");
+    const b=accountBytes(a);
+    if(!equal(b.subarray(0,8),discriminator))return {address:addresses[i],status:"unsupported_layout"};
+    const v=new DataView(b.buffer,b.byteOffset,b.byteLength);
+    const expected=protocol==="Meteora DLMM"?current.arrayIndex+i-1:current.arrayStart+(i-1)*(protocol==="Orca Whirlpool"?88:60)*current.tickSpacing;
+    const poolOffset=protocol==="Meteora DLMM"?24:protocol==="Orca Whirlpool"?9956:8;
+    const index=protocol==="Meteora DLMM"?Number(v.getBigInt64(8,true)):v.getInt32(protocol==="Orca Whirlpool"?8:40,true);
+    if(index!==expected||!equal(b.slice(poolOffset,poolOffset+32),key))throw new Error("Array pooli tai indeksi virheellinen");
+    return {address:addresses[i],status:"verified",index,byteLength:b.length};
+  });
 }
