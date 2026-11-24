@@ -32,6 +32,14 @@ let viewVersion = 0;
 const live = createLiveAdapter();
 const mode = () => byId("mode").value;
 let settings = defaults;
+const settingsKey = () => mode() === 'live' ? 'settings:live' : 'settings:paper';
+async function loadModeSettings() {
+  settings = validateSettings(await stored(settingsKey()) ?? (mode() === 'live' ? {} : await stored('settings') ?? {}));
+  for (const [name,value] of Object.entries(settings)) {
+    const field = byId('settings').elements.namedItem(name);
+    if (field) field.value = String(value);
+  }
+}
 let selection = solMarket;
 let rules;
 let timeframe = "5m";
@@ -541,7 +549,7 @@ byId("settings").onsubmit = async event => {
     const updated = validateSettings(Object.fromEntries(
       Array.from(new FormData(event.target), ([name, value]) => [name, value === "" ? NaN : Number(value)])
     ));
-    await stored("settings", updated);
+    await stored(settingsKey(), updated);
     settings = updated;
     setButtons();
     byId("status").textContent = "Asetukset tallennettu.";
@@ -550,8 +558,9 @@ byId("settings").onsubmit = async event => {
   }
 };
 
-byId("mode").onchange = () => {
-  if (!run) renderMode().catch(error => stop(error.message));
+byId("mode").onchange = async () => {
+  if (run || signing) return;
+  try { await loadModeSettings(); await renderMode(); } catch (error) { stop(error.message); }
 };
 byId("connect").onclick = async () => {
   const version = viewVersion;
@@ -795,7 +804,8 @@ try {
   emergency = await stored("emergency-stop") === true;
   devRecord = await stored("devnet-last");
   if (devRecord) byId("devnet-history").textContent = `${devRecord.state} · ${devRecord.signature}`;
-  settings = validateSettings(await stored("settings") ?? {});
+  byId("mode").value = "paper";
+  await loadModeSettings();
   selection = await stored("market") ?? solMarket;
   events = await stored("activity") ?? [];
   const legacyCopyWallet = await stored("copy-wallet");
