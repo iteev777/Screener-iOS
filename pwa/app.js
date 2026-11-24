@@ -234,6 +234,17 @@ byId("emergency").onclick = async () => {
   }
 };
 
+function renderPerformance(trades) {
+  const target=byId("trade-performance");
+  const sales=trades.filter(t=>t.side==="Myynti"&&Number.isFinite(t.realizedPnl));
+  target.replaceChildren(...[["Kaikki",sales],["Main",sales.filter(t=>t.strategy===5)],["Sniper",sales.filter(t=>t.strategy===6)]].map(([name,items])=>{
+    const wins=items.filter(t=>t.realizedPnl>0), gross=wins.reduce((s,t)=>s+t.realizedPnl,0), loss=-items.filter(t=>t.realizedPnl<0).reduce((s,t)=>s+t.realizedPnl,0);
+    const p=document.createElement("p");p.textContent=`${name} · Myynnit ${items.length} · Win rate ${items.length?(100*wins.length/items.length).toFixed(1)+" %":"—"} · Profit factor ${loss?(gross/loss).toFixed(2):gross?"∞":"—"} · P/L ${items.length?usd.format(gross-loss):"—"}`;return p;
+  }));
+  const note=document.createElement("p");note.textContent="Tilastot koskevat tallennettuja myyntitapahtumia, myös osamyyntejä. Vanhat myynnit ilman P/L-tietoa eivät sisälly.";target.append(note);
+  const canvas=byId("pnl-chart"),ctx=canvas.getContext("2d");if(!ctx)return;ctx.clearRect(0,0,canvas.width,canvas.height);
+  if(!sales.length)return;let total=0;const points=[0,...sales.slice().reverse().map(t=>total+=t.realizedPnl)];const lo=Math.min(...points),hi=Math.max(...points);ctx.strokeStyle="#89e8c1";ctx.lineWidth=2;ctx.beginPath();points.forEach((v,i)=>{const x=10+i*(canvas.width-20)/(points.length-1),y=10+(hi-v)/(hi-lo||1)*(canvas.height-20);if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);});ctx.stroke();
+}
 function renderScan(portfolio, ticks = []) {
   const positions = Object.values(portfolio.positions);
   const equity = portfolio.cash + positions.reduce((sum, p) => sum + p.sol * p.mark, 0);
@@ -250,6 +261,7 @@ function renderScan(portfolio, ticks = []) {
   if (ticks.length) rows("scan-markets", ticks.map(t => `${t.symbol || t.token} · ${priceUsd.format(t.price)}`));
   rows("scan-positions", positions.map(p =>
     `${p.market.symbol} · ${amount.format(p.sol)} · viimeisin P/L ${usd.format(p.mark * p.sol - p.cost)}`));
+  renderPerformance(portfolio.trades);
   rows("scan-trades", portfolio.trades.slice(0, 20).map(t =>
     `${new Date(t.at).toLocaleTimeString("fi-FI")} · ${t.side} · ${t.symbol} · ${priceUsd.format(t.price)} · ${reasons[t.reason]}`));
 }
