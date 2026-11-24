@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111726">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://api.dexscreener.com https://api.geckoterminal.com https://api.jup.ag https://api.rugcheck.xyz https://api.mainnet-beta.solana.com https://solana-rpc.publicnode.com https://api.devnet.solana.com wss://api.mainnet-beta.solana.com wss://solana-rpc.publicnode.com; object-src 'none'; base-uri 'none'; form-action 'self'">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<link rel="stylesheet" href="./style.css">
+<title>Screener Paper</title>
+</head>
+<body>
+<main>
+<header><p>Solana · Kaupankäynti</p><h1>Screener Paper</h1></header>
+<section class="trade-console" aria-label="Kaupankäynnin hallinta">
+<div class="console-head">
+<label for="mode">Kaupankäyntitila</label><span id="run-state" aria-live="polite">Pysäytetty</span>
+</div>
+<select id="mode" autocomplete="off" disabled><option value="paper">Paper Trading</option><option value="live">Live Trading</option></select>
+<div class="controls run-controls">
+<button id="scan" disabled>Käynnistä Paper-skannaus</button>
+<button id="live" class="secondary" disabled>Käynnistä valitulla poolilla</button>
+<button id="stop" class="secondary" disabled>Pysäytä</button>
+<button id="emergency" class="danger" aria-pressed="false" disabled>Hätäpysäytys</button>
+</div>
+<div class="controls auxiliary-controls">
+<button id="connect" class="secondary" hidden>Yhdistä Solana-lompakko</button>
+<button id="sign-probe" class="secondary" hidden>Testaa Devnet-allekirjoitus</button>
+<button id="demo" class="secondary" disabled>Aja testisarja</button>
+</div>
+<p id="status" role="status">Ladataan WebAssembly-moottoria…</p>
+</section>
+<div class="overview">
+<section aria-label="Markkina"><h2 id="market-title">SOL / USD</h2><strong id="price">—</strong><p id="source">Valitse hintalähde.</p><p>Solana WebSocket · slot <span id="slot">—</span></p></section>
+<section aria-label="Salkku"><h2 id="book-title">Paperisalkku</h2><strong id="equity">—</strong><p id="balance"></p><p id="position"></p></section>
+</div>
+<details id="open-panel"><summary>Avoimet paperipositiot</summary>
+<p id="no-open-positions">Ei avoimia positioita.</p><ul id="open-positions"></ul>
+</details>
+<details id="devnet-panel" hidden><summary>Devnet-tapahtumatesti</summary>
+<p id="devnet-wallet"></p>
+<button id="devnet-copy" class="secondary" type="button" disabled>Kopioi Devnet-osoite</button>
+<div class="controls">
+<button id="devnet-create" type="button" disabled>Luo tilapäinen Devnet-lompakko</button>
+<a id="devnet-faucet" href="https://faucet.solana.com/" target="_blank" rel="noopener noreferrer" hidden>Solanan Devnet-faucet</a>
+<button id="devnet-send" type="button" disabled>Lähetä Devnet-testimerkintä</button>
+<button id="devnet-sync" type="button" disabled>Tarkista Devnet-vahvistus</button>
+</div><p id="devnet-status" role="status"></p><p id="devnet-history"></p>
+</details>
+<details id="scan-panel"><summary>Automaattinen Paper-salkku</summary>
+<p id="scan-status" role="status"></p><p id="scan-balance"></p>
+<h2>Seuratut markkinat</h2><ul id="scan-markets"></ul>
+<h2>Avoimet skannauspositiot</h2><ul id="scan-positions"></ul>
+<h2>Skannauksen kaupat</h2><ol id="scan-trades"></ol></details>
+<section><h2 id="trades-title">Simuloidut kaupat</h2><p id="stats"></p><ol id="trades"></ol><p id="empty">Ei tapahtumia.</p></section>
+<details><summary>Strategia ja riskirajat</summary>
+<form id="settings">
+<fieldset id="settings-fields" disabled>
+<label>Strategia<select name="strategy"><option value="0">RSI</option><option value="1">EMA-risteys</option><option value="2">Hintamurto</option><option value="3">Oma ehtopuu</option><option value="4">Copy Trading (Paper)</option></select></label>
+<label>Oston koko, USD<input name="orderUsd" type="number" step="any" required></label>
+<label>Positioraja, USD<input name="exposureUsd" type="number" step="any" required></label>
+<label>Tappioraja / UTC-päivä, USD<input name="lossUsd" type="number" step="any" required></label>
+<label>Stop loss, %<input name="stop" type="number" step="any" required></label>
+<label>Take profit, %<input name="profit" type="number" step="any" required></label>
+<label>Ensimmäisessä voittotavoitteessa myytävä osuus, %<input name="profitShare" type="number" step="any" required></label>
+<label>Jäljelle jäävän position voittotavoite, %<input name="finalProfit" type="number" step="any" required></label>
+<label>Trailing stop, %<input name="trailing" type="number" step="any" required></label>
+<label>Break-evenin aktivointi, %<input name="breakEven" type="number" step="any" required></label>
+<label>Enimmäispitoaika, min<input name="holdMinutes" type="number" step="any" required></label>
+<label>Ostojen jäähy, s<input name="cooldownSeconds" type="number" step="any" required></label>
+<label>Paperin kulut, bp<input name="feeBps" type="number" step="any" required></label>
+<label>Paperin liukuma, bp<input name="slippageBps" type="number" step="any" required></label>
+<label>Lisäostoja (0 tai 1)<input name="dca" type="number" step="any" required></label>
+<label>Hintaväli, s<input name="interval" type="number" step="any" required></label>
+<label>Vähimmäislikviditeetti, USD<input name="minLiquidity" type="number" step="any" required></label>
+<label>Skannattavien poolien enimmäismäärä (1–30)<input name="maxPools" type="number" min="1" max="30" required></label>
+<label>Skannauksen RugCheck-enimmäispisteet (0 = pois)<input name="rugScore" type="number" step="1" min="0" max="100" required></label>
+<label>Ostoja enintään UTC-päivässä<input name="maxDailyBuys" type="number" min="1" max="100" required></label>
+<label>Skannauksen 24 h vähimmäisvolyymi, USD<input name="scanMinVolume" type="number" min="0" step="any" required></label>
+<button>Tallenna asetukset</button>
+</fieldset>
+</form></details>
+<details><summary>Markkinahaku ja OHLCV</summary>
+<form id="market-search">
+<label>Token tai osoite<input name="query" maxlength="100"></label>
+<label>Vähimmäislikviditeetti, USD<input name="liquidity" type="number" min="0" value="10000" required></label>
+<label>Vähimmäisvolyymi 24 h, USD<input name="volume" type="number" min="0" value="0" required></label>
+<div class="controls"><button>Hae Solana-markkinoita</button>
+<button value="new_pools">Uudet poolit</button><button value="trending_pools">Trendaavat poolit</button></div>
+</form>
+<p id="market-status" role="status"></p><ol id="market-results"></ol>
+<button id="load-candles" type="button">Hae OHLCV</button>
+<p id="candle-status" role="status"></p><ol id="candles"></ol>
+</details>
+<details><summary>Oma ehtopuu</summary>
+<form id="rules"><fieldset id="rule-fields" disabled>
+<label>OHLCV-aikaväli<select id="timeframe"><option>1m</option><option selected>5m</option><option>15m</option><option>1h</option><option>4h</option><option>1d</option></select></label>
+<label>Entry- ja exit-ehdot (JSON)<textarea id="rule-json" required rows="8">{
+  "entry": {"metric":"rsi","period":14,"compare":"lt","value":30},
+  "exit": {"metric":"rsi","period":14,"compare":"gt","value":70}
+}</textarea></label>
+<button>Tallenna ehtopuut</button>
+</fieldset></form>
+</details>
+<details><summary>Copy Trading</summary>
+<form id="copy-settings"><fieldset id="copy-fields" disabled>
+<label>Seurattavat Solana-lompakot (enintään 4, yksi rivillä)<textarea id="copy-wallet" required maxlength="200" rows="4"></textarea></label>
+<button>Tallenna lompakko</button>
+</fieldset></form></details>
+<section id="settlement-panel" hidden><h2>Ketjussa vahvistetut Jupiter/USDC-kaupat</h2>
+<button id="sync-swaps" type="button" hidden>Synkronoi lompakon kaupat</button><ol id="settlements"></ol>
+<h2>Jupiter-hinta-arvio</h2>
+<form id="quote-form">
+<label>Suunta<select name="side"><option value="buy">Osta USDC:llä</option><option value="sell">Myy USDC:ksi</option></select></label>
+<label>Syötemäärä (USDC tai token)<input name="value" inputmode="decimal" maxlength="30" required></label>
+<label>Jupiter API-avain (tarvittaessa)<input name="apiKey" type="password" maxlength="256" autocomplete="off"></label>
+<div class="controls"><button>Hae hinta-arvio</button>
+<button id="simulate-swap" value="simulate" disabled>Muodosta ja simuloi swap</button></div>
+</form><p id="quote-result" role="status"></p></section>
+<details><summary>Botin toimintaloki</summary><ol id="activity"></ol></details>
+<footer><a href="./LICENSE">Alkuperäinen lisenssi · BUSL-1.1</a></footer>
+</main>
+<script type="module" src="./app.js"></script>
+</body></html>
