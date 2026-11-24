@@ -92,3 +92,19 @@ export async function reconcileLiveSignature(signature,signal){
   if(["confirmed","finalized"].includes(status.confirmationStatus))return {signature,state:"confirmed",slot:status.slot};
   return {signature,state:"pending",slot:status.slot};
 }
+
+/* Wallet balances are read independently of the paper portfolio. */
+export async function readWalletTokenBalance(address,mint,signal){
+  publicKeyBytes(address);publicKeyBytes(mint);
+  const result=await rpcCall("getTokenAccountsByOwner",[address,{mint},{encoding:"jsonParsed",commitment:"confirmed"}],signal);
+  if(!Array.isArray(result?.value))throw new Error("Token-saldon haku epäonnistui");
+  let total=0n,decimals=null;
+  for(const row of result.value){
+    const info=row.account?.data?.parsed?.info;
+    const amount=info?.tokenAmount;
+    if(info?.owner!==address||info?.mint!==mint||!/^\d+$/.test(amount?.amount??"")||!Number.isInteger(amount.decimals)||amount.decimals<0||amount.decimals>18)throw new Error("Virheellinen token-tili");
+    if(decimals!==null&&decimals!==amount.decimals)throw new Error("Tokenin desimaalit eivät täsmää");
+    decimals=amount.decimals;total+=BigInt(amount.amount);
+  }
+  return {mint,raw:total.toString(),decimals,slot:result.context?.slot};
+}
