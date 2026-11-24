@@ -175,3 +175,27 @@ export async function decodeCpmmFees(raw) {
   if(trade+creator>=1000000n || protocol+fund>1000000n) throw new Error("CPMM palkkiot virheelliset");
   return Number(trade+creator)/100;
 }
+
+export function curvePricing(protocol, bytes, decimals) {
+  if (!Number.isInteger(decimals) || decimals<0 || decimals>255) throw new Error("Mintin desimaalit virheelliset");
+  const v=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const u=o=>v.getBigUint64(o,true);
+  let priceSol, liquiditySol;
+  if(protocol==="Pump.fun"){
+    if(bytes.length<125 || bytes[48] || bytes[81] || bytes[82] || bytes[124]) throw new Error("Pump.fun käyrä ei ole tuettu");
+    const virtualTokens=Number(u(8))/10**decimals, virtualQuote=Number(u(16))/1e9;
+    if(virtualTokens<=0 || virtualQuote<=0) throw new Error("Tyhjä virtuaalinen reservi");
+    priceSol=virtualQuote/virtualTokens;
+    liquiditySol=Number(u(32))/1e9+Number(u(24))/10**decimals*priceSol;
+  } else if(protocol==="Moonit"){
+    if(bytes.length<82 || bytes[56]!==decimals || bytes[57]!==0 || bytes[58]!==1) throw new Error("Moonit käyrä ei ole tuettu");
+    const total=u(8), remaining=u(16), initial=1073000000000000000n, sol=30000000000n;
+    const virtual=initial-(total-remaining);
+    if(remaining<=0n || total<=remaining || virtual<=0n) throw new Error("Moonit reservi virheellinen");
+    const virtualSol=initial*sol/virtual;
+    priceSol=(Number(virtualSol)/1e9)/(Number(virtual)/10**decimals);
+    liquiditySol=Math.max(0,Number(virtualSol-sol))/1e9+Number(remaining)/10**decimals*priceSol;
+  } else throw new Error("Tuntematon bonding curve");
+  if(!Number.isFinite(priceSol)||priceSol<=0||!Number.isFinite(liquiditySol)||liquiditySol<=0) throw new Error("Käyrän hinta tai likviditeetti virheellinen");
+  return {priceSol,liquiditySol,priceMode:"bonding_curve"};
+}
