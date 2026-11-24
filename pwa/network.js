@@ -4,7 +4,8 @@ export const rpc = "https://api.mainnet-beta.solana.com";
 const alternateRpc = "https://solana-rpc.publicnode.com";
 let preferAlternateUntil = 0;
 const retryableReads = new Set(["getMultipleAccounts", "getBalance", "getTokenSupply",
-  "getSignaturesForAddress", "getTransaction", "simulateTransaction"]);
+  "getSignaturesForAddress", "getTransaction", "simulateTransaction",
+  "getSignatureStatuses", "getTokenAccountsByOwner", "getLatestBlockhash", "getBlockHeight"]);
 
 export async function fetchJson(url, options = {}, signal) {
   const controller = new AbortController();

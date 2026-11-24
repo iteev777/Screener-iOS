@@ -4,15 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#111726">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' wss://pumpportal.fun https://public-api.birdeye.so https://api.dexscreener.com https://api.geckoterminal.com https://api.jup.ag https://api.rugcheck.xyz https://api.mainnet-beta.solana.com https://solana-rpc.publicnode.com https://api.devnet.solana.com wss://api.mainnet-beta.solana.com wss://solana-rpc.publicnode.com; object-src 'none'; base-uri 'none'; form-action 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' wss://pumpportal.fun https://public-api.birdeye.so https://api.dexscreener.com https://api.geckoterminal.com https://api.jup.ag https://lite-api.jup.ag https://api.coingecko.com https://api.llama.fi https://api.rugcheck.xyz https://api.mainnet-beta.solana.com https://solana-rpc.publicnode.com https://api.devnet.solana.com wss://api.mainnet-beta.solana.com wss://solana-rpc.publicnode.com; object-src 'none'; base-uri 'none'; form-action 'self'">
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./icon-192.png">
 <link rel="stylesheet" href="./style.css">
-<title>Screener Paper</title>
+<title>Screener iOS</title>
 </head>
 <body>
 <main>
-<header><p>Solana · Kaupankäynti</p><h1>Screener Paper</h1></header>
+<header><p>Solana · Kaupankäynti</p><h1>Screener iOS</h1></header>
+<nav id="dashboard-nav" aria-label="Dashboard"><button type="button" data-view="home" aria-pressed="true">Home</button><button type="button" data-view="tokens">Tokens</button><button type="button" data-view="positions">Positions</button><button type="button" data-view="trader">Trader</button><button type="button" data-view="filtering">Filtering</button><button type="button" data-view="monitoring">Monitoring</button><button type="button" data-view="settings">Settings</button></nav>
 <section class="trade-console" aria-label="Kaupankäynnin hallinta">
 <div class="console-head">
 <label for="mode">Kaupankäyntitila</label><span id="run-state" aria-live="polite">Pysäytetty</span>
@@ -31,14 +32,14 @@
 </div>
 <p id="status" role="status">Ladataan WebAssembly-moottoria…</p>
 </section>
-<div class="overview">
+<section data-page="home"><h2>Paper Trading · Portfolio</h2><div class="metric-grid"><div><p>Salkun arvo</p><strong id="home-equity">—</strong></div><div><p>Käteinen</p><strong id="home-cash">—</strong></div><div><p>Toteutunut P/L</p><strong id="home-pnl">—</strong></div><div><p>Avoimet positiot</p><strong id="home-count">—</strong></div></div></section><div class="overview" data-page="home">
 <section aria-label="Markkina"><h2 id="market-title">SOL / USD</h2><strong id="price">—</strong><p id="source">Valitse hintalähde.</p><p>Solana WebSocket · slot <span id="slot">—</span></p></section>
 <section aria-label="Salkku"><h2 id="book-title">Paperisalkku</h2><strong id="equity">—</strong><p id="balance"></p><p id="position"></p></section>
 </div>
-<details id="open-panel"><summary>Avoimet paperipositiot</summary>
+<details id="open-panel" data-page="positions"><summary>Avoimet paperipositiot</summary>
 <p id="no-open-positions">Ei avoimia positioita.</p><ul id="open-positions"></ul>
 </details>
-<details id="devnet-panel" hidden><summary>Devnet-tapahtumatesti</summary>
+<details data-page="settings" id="devnet-panel" hidden><summary>Devnet-tapahtumatesti</summary>
 <p id="devnet-wallet"></p>
 <button id="devnet-copy" class="secondary" type="button" disabled>Kopioi Devnet-osoite</button>
 <div class="controls">
@@ -48,19 +49,25 @@
 <button id="devnet-sync" type="button" disabled>Tarkista Devnet-vahvistus</button>
 </div><p id="devnet-status" role="status"></p><p id="devnet-history"></p>
 </details>
-<details id="scan-panel"><summary>Automaattinen Paper-salkku</summary>
+<section data-page="filtering"><h2>Filtering status</h2><p id="filter-summary">Odotetaan skannausta.</p><div id="filter-reasons"></div></section>
+<section data-page="monitoring"><h2>Service status</h2><p id="monitor-summary">Odotetaan skannausta.</p><div id="monitor-sources"></div></section>
+<details id="scan-panel" data-page="tokens"><summary>Automaattinen Paper-salkku</summary>
 <p id="scan-status" role="status"></p>
 <p id="scan-counts">Löydetyt 0 · Analysoidut 0 · Hylätyt 0 · Hyväksytyt 0</p>
 <p id="scan-queue">Jono 0 · Uudelleenhaku 0</p>
-<label>Birdeye API-avain (valinnainen)<input id="birdeye-key" type="password" autocomplete="off" maxlength="256"></label><p id="scan-balance"></p>
+<label>Birdeye API-avain (valinnainen)<input id="birdeye-key" type="password" autocomplete="off" maxlength="256"></label>
+<label>Jupiter API-avain (valinnainen)<input id="trojan-jupiter-key" type="password" autocomplete="off" maxlength="256"></label>
+<label>Simulaation julkinen Solana-osoite (valinnainen)<input id="trojan-taker" autocomplete="off" maxlength="44"></label>
+<label>Tokenien tila<select id="token-status-filter"><option value="all">Kaikki</option><option value="approve">Hyväksytyt</option><option value="reject">Hylätyt</option><option value="watch">Odottavat</option><option value="found">Uudet</option></select></label><label>Hae mint-osoitteella<input id="token-filter-query" type="search"></label><ul id="token-filter-results"></ul><details><summary>Tokenien analyysiloki</summary><ol id="scan-events"></ol></details><p id="scan-balance"></p>
 <h2>Seuratut markkinat</h2><ul id="scan-markets"></ul>
-<h2>Avoimet skannauspositiot</h2><ul id="scan-positions"></ul>
-<h2>Skannauksen kaupat</h2><ol id="scan-trades"></ol></details>
-<section><h2 id="trades-title">Simuloidut kaupat</h2><p id="stats"></p><ol id="trades"></ol><p id="empty">Ei tapahtumia.</p></section>
-<details><summary>Strategia ja riskirajat</summary>
+</details><section data-page="positions"><h2>Avoimet skannauspositiot</h2><ul id="scan-positions"></ul><h2>Kaupankäyntitilastot</h2><div id="trade-performance"></div><canvas id="pnl-chart" width="640" height="220" aria-label="Toteutuneiden myyntien tuottokäyrä" style="width:100%;height:auto"></canvas><h2>Skannauksen kaupat</h2><ol id="scan-trades"></ol></section>
+<section data-page="positions"><h2 id="trades-title">Simuloidut kaupat</h2><p id="stats"></p><ol id="trades"></ol><p id="empty">Ei tapahtumia.</p></section>
+<details data-page="settings"><summary>Strategia ja riskirajat</summary>
 <form id="settings">
+<details><summary>MAIN – tokenien hakurajat</summary><label>Minimilikviditeetti USD<input name="mainMinLiquidity" type="number" min="0" max="1000000000" step="any" required></label><label>24 h minimivolyymi USD<input name="mainMinVolume24" type="number" min="0" max="1000000000" step="any" required></label><label>5 min minimivolyymi USD<input name="mainMinVolume5" type="number" min="0" max="1000000000" step="any" required></label><label>Minimi-ikä min<input name="mainMinAge" type="number" min="0" max="10000000" step="any" required></label><label>Maksimi-ikä min (0 = ei rajaa)<input name="mainMaxAge" type="number" min="0" max="10000000" step="any" required></label><input type="hidden" name="mainMinTrades"><input type="hidden" name="mainMinTradesHour"><label>Minimiostopaine %<input name="mainMinPressure" type="number" min="0" max="100" step="any" required></label><label>5 min minimimuutos %<input name="mainMinChange5" type="number" min="-100" max="100000" step="any" required></label><label>5 min maksimimuutos %<input name="mainMaxChange5" type="number" min="-100" max="100000" step="any" required></label><input type="hidden" name="mainMinChange1h"><input type="hidden" name="mainMaxChange1h"><input type="hidden" name="mainMinChange24"><input type="hidden" name="mainMaxVolumeRatio"><label>Minimipisteet<input name="mainMinScore" type="number" min="0" max="100" step="any" required></label><input type="hidden" name="mainMinSources"><label>Maksimikustannus %<input name="mainMaxImpact" type="number" min="0" max="100" step="any" required></label></details>
+<details><summary>SNIPER – tokenien hakurajat</summary><label>Minimilikviditeetti USD<input name="sniperMinLiquidity" type="number" min="0" max="1000000000" step="any" required></label><label>24 h minimivolyymi USD<input name="sniperMinVolume24" type="number" min="0" max="1000000000" step="any" required></label><label>5 min minimivolyymi USD<input name="sniperMinVolume5" type="number" min="0" max="1000000000" step="any" required></label><label>Minimi-ikä min<input name="sniperMinAge" type="number" min="0" max="10000000" step="any" required></label><label>Maksimi-ikä min (0 = ei rajaa)<input name="sniperMaxAge" type="number" min="0" max="10000000" step="any" required></label><input type="hidden" name="sniperMinTrades"><input type="hidden" name="sniperMinTradesHour"><label>Minimiostopaine %<input name="sniperMinPressure" type="number" min="0" max="100" step="any" required></label><label>5 min minimimuutos %<input name="sniperMinChange5" type="number" min="-100" max="100000" step="any" required></label><label>5 min maksimimuutos %<input name="sniperMaxChange5" type="number" min="-100" max="100000" step="any" required></label><input type="hidden" name="sniperMinChange1h"><input type="hidden" name="sniperMaxChange1h"><input type="hidden" name="sniperMinChange24"><input type="hidden" name="sniperMaxVolumeRatio"><label>Minimipisteet<input name="sniperMinScore" type="number" min="0" max="100" step="any" required></label><input type="hidden" name="sniperMinSources"><label>Maksimikustannus %<input name="sniperMaxImpact" type="number" min="0" max="100" step="any" required></label></details>
 <fieldset id="settings-fields" disabled>
-<label>Strategia<select name="strategy"><option value="0">RSI</option><option value="1">EMA-risteys</option><option value="2">Hintamurto</option><option value="3">Oma ehtopuu</option><option value="4">Copy Trading (Paper)</option><option value="5">Trojan V2 Main</option><option value="6">Trojan V2 Sniper</option></select></label>
+<label>Strategia<select name="strategy"><option value="0">RSI</option><option value="1">EMA-risteys</option><option value="2">Hintamurto</option><option value="3">Oma ehtopuu</option><option value="4">Copy Trading (Paper)</option><option value="5">Trojan V2 Main</option><option value="6">Trojan V2 Sniper</option><option value="7">Trojan V2 Main + Sniper</option></select></label>
 <label>Oston koko, USD<input name="orderUsd" type="number" step="any" required></label>
 <label>Positioraja, USD<input name="exposureUsd" type="number" step="any" required></label>
 <label>Tappioraja / UTC-päivä, USD<input name="lossUsd" type="number" step="any" required></label>
@@ -81,10 +88,36 @@
 <label>Skannauksen RugCheck-enimmäispisteet (0 = pois)<input name="rugScore" type="number" step="1" min="0" max="100" required></label>
 <label>Ostoja enintään UTC-päivässä<input name="maxDailyBuys" type="number" min="1" max="100" required></label>
 <label>Skannauksen 24 h vähimmäisvolyymi, USD<input name="scanMinVolume" type="number" min="0" step="any" required></label>
+<label>Main-positioiden enimmäismäärä<input name="maxMainPositions" type="number" min="1" max="30" required></label>
+<label>Sniper-positioiden enimmäismäärä<input name="maxSniperPositions" type="number" min="1" max="30" required></label>
+<label>Analyysityöntekijät (1–24)<input name="analysisWorkers" type="number" min="1" max="24" required></label>
+<label>Positioita yhteensä<input name="maxTotalPositions" type="number" min="1" max="30" required></label>
+<label>Oston enimmäisosuus käteisestä, %<input name="balanceFraction" type="number" min="1" max="100" step="any" required></label>
+<label>Lisäoston hinnanlasku, %<input name="dcaDrop" type="number" min="0.1" max="49" step="any" required></label>
+<details><summary>Main – kaupankäyntiasetukset</summary><label>Oston koko USD<input name="mainOrderUsd" type="number" min="1" max="500" step="any" required></label>
+<label>Stop loss %<input name="mainStop" type="number" min="0.1" max="50" step="any" required></label>
+<label>Ensimmäinen take profit %<input name="mainProfit" type="number" min="0.1" max="500" step="any" required></label>
+<label>Myytävä osuus %<input name="mainProfitShare" type="number" min="1" max="100" step="any" required></label>
+<label>Lopullinen take profit %<input name="mainFinalProfit" type="number" min="0.1" max="500" step="any" required></label>
+<label>Trailing stop %<input name="mainTrailing" type="number" min="0" max="50" step="any" required></label>
+<label>Break-even %<input name="mainBreakEven" type="number" min="0" max="100" step="any" required></label>
+<label>Pitoaika min<input name="mainHoldMinutes" type="number" min="1" max="1440" step="any" required></label>
+<label>DCA 0/1<input name="mainDca" type="number" min="0" max="1" step="1" required></label>
+<label>DCA lasku %<input name="mainDcaDrop" type="number" min="0.1" max="49" step="any" required></label></details>
+<details><summary>Sniper – kaupankäyntiasetukset</summary><label>Oston koko USD<input name="sniperOrderUsd" type="number" min="1" max="500" step="any" required></label>
+<label>Stop loss %<input name="sniperStop" type="number" min="0.1" max="50" step="any" required></label>
+<label>Ensimmäinen take profit %<input name="sniperProfit" type="number" min="0.1" max="500" step="any" required></label>
+<label>Myytävä osuus %<input name="sniperProfitShare" type="number" min="1" max="100" step="any" required></label>
+<label>Lopullinen take profit %<input name="sniperFinalProfit" type="number" min="0.1" max="500" step="any" required></label>
+<label>Trailing stop %<input name="sniperTrailing" type="number" min="0" max="50" step="any" required></label>
+<label>Break-even %<input name="sniperBreakEven" type="number" min="0" max="100" step="any" required></label>
+<label>Pitoaika min<input name="sniperHoldMinutes" type="number" min="1" max="1440" step="any" required></label>
+<label>DCA 0/1<input name="sniperDca" type="number" min="0" max="1" step="1" required></label>
+<label>DCA lasku %<input name="sniperDcaDrop" type="number" min="0.1" max="49" step="any" required></label></details>
 <button>Tallenna asetukset</button>
 </fieldset>
 </form></details>
-<details><summary>Markkinahaku ja OHLCV</summary>
+<details data-page="tokens"><summary>Markkinahaku ja OHLCV</summary>
 <form id="market-search">
 <label>Token tai osoite<input name="query" maxlength="100"></label>
 <label>Vähimmäislikviditeetti, USD<input name="liquidity" type="number" min="0" value="10000" required></label>
@@ -93,25 +126,25 @@
 <button value="new_pools">Uudet poolit</button><button value="trending_pools">Trendaavat poolit</button></div>
 </form>
 <p id="market-status" role="status"></p><ol id="market-results"></ol>
-<button id="load-candles" type="button">Hae OHLCV</button>
+<section aria-label="Token details"><h2 id="token-detail-title">Token Details</h2><p id="token-detail-data">Valitse hakutulos.</p><label>Kaavion aikaväli<select id="chart-timeframe"><option>1m</option><option selected>5m</option><option>15m</option><option>1h</option><option>4h</option><option>1d</option></select></label><canvas id="token-chart" width="640" height="300" aria-label="OHLCV-hintakaavio"></canvas><p id="chart-range"></p><button type="button" id="token-security" class="secondary">Tarkista turvallisuus ja poolit</button><p id="token-risk" role="status"></p><h2>Poolit</h2><ul id="token-pools"></ul></section><button id="load-candles" type="button">Hae OHLCV</button>
 <p id="candle-status" role="status"></p><ol id="candles"></ol>
 </details>
-<details><summary>Oma ehtopuu</summary>
+<details data-page="settings"><summary>Oma ehtopuu</summary>
 <form id="rules"><fieldset id="rule-fields" disabled>
 <label>OHLCV-aikaväli<select id="timeframe"><option>1m</option><option selected>5m</option><option>15m</option><option>1h</option><option>4h</option><option>1d</option></select></label>
-<label>Entry- ja exit-ehdot (JSON)<textarea id="rule-json" required rows="8">{
+<div id="visual-rules"></div><button type="button" id="visual-load" class="secondary">Lataa nykyiset ehdot editoriin</button><p id="visual-status" role="status"></p><label>Entry- ja exit-ehdot (JSON)<textarea id="rule-json" required rows="8">{
   "entry": {"metric":"rsi","period":14,"compare":"lt","value":30},
   "exit": {"metric":"rsi","period":14,"compare":"gt","value":70}
 }</textarea></label>
 <button>Tallenna ehtopuut</button>
 </fieldset></form>
 </details>
-<details><summary>Copy Trading</summary>
+<details data-page="trader"><summary>Copy Trading</summary>
 <form id="copy-settings"><fieldset id="copy-fields" disabled>
 <label>Seurattavat Solana-lompakot (enintään 4, yksi rivillä)<textarea id="copy-wallet" required maxlength="200" rows="4"></textarea></label>
 <button>Tallenna lompakko</button>
 </fieldset></form></details>
-<section id="settlement-panel" hidden><h2>Ketjussa vahvistetut Jupiter/USDC-kaupat</h2>
+<section data-page="trader" id="settlement-panel" hidden><h2>Ketjussa vahvistetut Jupiter/USDC-kaupat</h2>
 <button id="sync-swaps" type="button" hidden>Synkronoi lompakon kaupat</button><ol id="settlements"></ol>
 <h2>Jupiter-hinta-arvio</h2>
 <form id="quote-form">
@@ -121,8 +154,10 @@
 <div class="controls"><button>Hae hinta-arvio</button>
 <button id="simulate-swap" value="simulate" disabled>Muodosta ja simuloi swap</button></div>
 </form><p id="quote-result" role="status"></p></section>
-<details><summary>Botin toimintaloki</summary><ol id="activity"></ol></details>
+<details data-page="monitoring"><summary>Botin toimintaloki</summary><ol id="activity"></ol></details>
 <footer><a href="./LICENSE">Alkuperäinen lisenssi · BUSL-1.1</a></footer>
 </main>
 <script type="module" src="./app.js"></script>
+<script type="module" src="./dashboard-nav.js"></script>
+<script type="module" src="./visual-rules.js"></script>
 </body></html>

@@ -1,6 +1,6 @@
 import { devnetBalance, newDevnetWallet, reconcileDevnet, submitDevnetMemo } from "./devnet.js";
 import { advancePortfolio, newPortfolio, runScanner, scanKey } from "./scanner.js";
-import { createLiveAdapter } from "./live-adapter.js";
+import { reconcileLiveSignature, createLiveAdapter } from "./live-adapter.js";
 
 import { currentMarket, watchSlots } from "./network.js";
 import { applyPaperFill, defaults, orderFor, reasons, validateSettings } from "./policy.js";
@@ -32,6 +32,14 @@ let viewVersion = 0;
 const live = createLiveAdapter();
 const mode = () => byId("mode").value;
 let settings = defaults;
+const settingsKey = () => mode() === 'live' ? 'settings:live' : 'settings:paper';
+async function loadModeSettings() {
+  settings = validateSettings(await stored(settingsKey()) ?? (mode() === 'live' ? {} : await stored('settings') ?? {}));
+  for (const [name,value] of Object.entries(settings)) {
+    const field = byId('settings').elements.namedItem(name);
+    if (field) field.value = String(value);
+  }
+}
 let selection = solMarket;
 let rules;
 let timeframe = "5m";
@@ -73,6 +81,38 @@ function stored(key, value) {
     transaction.oncomplete = () => resolve(request.result);
     transaction.onabort = () => reject(transaction.error);
   });
+}
+
+// Persistent wallet-scoped journal. Reserve before submission, reconcile before retry.
+async function liveJournal(account, record) {
+  if(!solanaAddress.test(account))throw new Error("Virheellinen lompakko");
+  const key="live-journal:"+account;
+  return new Promise((resolve,reject)=>{
+    const tx=database.transaction("books","readwrite"), store=tx.objectStore("books"), req=store.get(key);
+    let rows;
+    req.onsuccess=()=>{
+      rows=req.result??[];
+      if(!record)return;
+      const previous=rows.find(x=>x.id===record.id);
+      if(record.state==="reserved"){
+        if(previous||rows.some(x=>["reserved","pending","unknown"].includes(x.state))){tx.abort();return;}
+      }else if(!previous||!["reserved","pending","unknown"].includes(previous.state)){tx.abort();return;}
+      rows=[{...previous,...record,updatedAt:Date.now()},...rows.filter(x=>x.id!==record.id)].slice(0,200);
+      store.put(rows,key);
+    };
+    tx.oncomplete=()=>resolve(rows);
+    tx.onabort=()=>reject(tx.error??new Error("Live-tapahtuma on lukittu tai odottaa vahvistusta"));
+  });
+}
+async function reconcileLiveJournal(account,signal){
+  const rows=await liveJournal(account);
+  for(const row of rows){
+    if(signal.aborted)break;
+    if(!row.signature||!["pending","unknown"].includes(row.state))continue;
+    const status=await reconcileLiveSignature(row.signature,signal);
+    await liveJournal(account,{id:row.id,...status});
+  }
+  return liveJournal(account);
 }
 
 function openDatabase() {
@@ -165,7 +205,8 @@ function setButtons() {
   byId("emergency").textContent = emergency ? "Vapauta hätäpysäytys" : "Hätäpysäytys";
   byId("emergency").setAttribute("aria-pressed", String(emergency));
   byId("devnet-copy").disabled = !devWallet;
-  byId("run-state").textContent = emergency ? "Lukittu" : run ? "Käynnissä" : "Pysäytetty";
+  byId("run-state").textContent = changingInterlock ? "Tallennetaan…" :
+    emergency ? "Lukittu" : run ? "Käynnissä" : "Pysäytetty";
   byId("mode").disabled = busy || Boolean(signing) || Boolean(devAction);
   byId("settings-fields").disabled = busy;
   byId("rule-fields").disabled = busy;
@@ -225,9 +266,24 @@ byId("emergency").onclick = async () => {
   }
 };
 
+function renderPerformance(trades) {
+  const target=byId("trade-performance");
+  const sales=trades.filter(t=>t.side==="Myynti"&&Number.isFinite(t.realizedPnl));
+  target.replaceChildren(...[["Kaikki",sales],["Main",sales.filter(t=>t.strategy===5)],["Sniper",sales.filter(t=>t.strategy===6)]].map(([name,items])=>{
+    const wins=items.filter(t=>t.realizedPnl>0), gross=wins.reduce((s,t)=>s+t.realizedPnl,0), loss=-items.filter(t=>t.realizedPnl<0).reduce((s,t)=>s+t.realizedPnl,0);
+    const p=document.createElement("p");p.textContent=`${name} · Myynnit ${items.length} · Win rate ${items.length?(100*wins.length/items.length).toFixed(1)+" %":"—"} · Profit factor ${loss?(gross/loss).toFixed(2):gross?"∞":"—"} · P/L ${items.length?usd.format(gross-loss):"—"}`;return p;
+  }));
+  const note=document.createElement("p");note.textContent="Tilastot koskevat tallennettuja myyntitapahtumia, myös osamyyntejä. Vanhat myynnit ilman P/L-tietoa eivät sisälly.";target.append(note);
+  const canvas=byId("pnl-chart"),ctx=canvas.getContext("2d");if(!ctx)return;ctx.clearRect(0,0,canvas.width,canvas.height);
+  if(!sales.length)return;let total=0;const points=[0,...sales.slice().reverse().map(t=>total+=t.realizedPnl)];const lo=Math.min(...points),hi=Math.max(...points);ctx.strokeStyle="#89e8c1";ctx.lineWidth=2;ctx.beginPath();points.forEach((v,i)=>{const x=10+i*(canvas.width-20)/(points.length-1),y=10+(hi-v)/(hi-lo||1)*(canvas.height-20);if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);});ctx.stroke();
+}
 function renderScan(portfolio, ticks = []) {
   const positions = Object.values(portfolio.positions);
   const equity = portfolio.cash + positions.reduce((sum, p) => sum + p.sol * p.mark, 0);
+  byId("home-equity").textContent = usd.format(equity);
+  byId("home-cash").textContent = usd.format(portfolio.cash);
+  byId("home-pnl").textContent = usd.format(portfolio.realized);
+  byId("home-count").textContent = String(positions.length);
   byId("scan-balance").textContent = `${usd.format(portfolio.cash)} käteistä · salkku ${usd.format(equity)} · toteutunut P/L ${usd.format(portfolio.realized)}`;
   const rows = (id, values) => byId(id).replaceChildren(...values.map(value => {
     const item = document.createElement("li");
@@ -237,6 +293,7 @@ function renderScan(portfolio, ticks = []) {
   if (ticks.length) rows("scan-markets", ticks.map(t => `${t.symbol || t.token} · ${priceUsd.format(t.price)}`));
   rows("scan-positions", positions.map(p =>
     `${p.market.symbol} · ${amount.format(p.sol)} · viimeisin P/L ${usd.format(p.mark * p.sol - p.cost)}`));
+  renderPerformance(portfolio.trades);
   rows("scan-trades", portfolio.trades.slice(0, 20).map(t =>
     `${new Date(t.at).toLocaleTimeString("fi-FI")} · ${t.side} · ${t.symbol} · ${priceUsd.format(t.price)} · ${reasons[t.reason]}`));
 }
@@ -270,6 +327,14 @@ async function startScan() {
   const policy = settings;
   const birdeyeKey = byId("birdeye-key").value.trim();
   byId("birdeye-key").value = "";
+  const jupiterKey = byId("trojan-jupiter-key").value.trim();
+  byId("trojan-jupiter-key").value = "";
+  const simulationWallet = byId("trojan-taker").value.trim();
+  if (simulationWallet && !solanaAddress.test(simulationWallet)) {
+    byId("scan-status").textContent = "Anna kelvollinen julkinen Solana-osoite.";
+    return;
+  }
+  byId("scan-events").replaceChildren();
   if ((policy.strategy === 4 && !copyWallets.length) || (policy.strategy === 3 && !rules)) {
     byId("scan-status").textContent = "Tallenna ehtopuu tai Copy Trading -lompakko valitulle strategialle.";
     return;
@@ -283,12 +348,56 @@ async function startScan() {
   byId("status").textContent = "Automaattinen Paper-skannaus käynnissä.";
   try {
     const load = async () => await stored(scanKey) ?? newPortfolio();
+    const samples = [];
+    const rejectionReasons = new Map();
+    const tokenResults = new Map();
+    const filter = byId("token-status-filter"), query = byId("token-filter-query"), results = byId("token-filter-results");
+    function renderTokens(){const q=query.value.trim();const rows=[...tokenResults.values()].reverse().filter(e=>(filter.value==="all"||e.status===filter.value)&&(!q||e.mint.includes(q))).slice(0,100);results.replaceChildren(...rows.map(e=>{const li=document.createElement("li");const label=document.createElement("p");label.textContent=`${e.mint} · ${e.status} · ${e.score??"—"}/100 · ${e.reason}`;const b=document.createElement("button");b.type="button";b.className="secondary";b.textContent="Tutki markkinaa";b.onclick=()=>{const form=byId("market-search");form.elements.query.value=e.mint;form.elements.liquidity.value="0";form.elements.volume.value="0";form.closest("details").open=true;const submit=form.querySelector("button");if(!submit.disabled)form.requestSubmit(submit);form.scrollIntoView({block:"start"});};li.append(label,b);return li;}));}
+    filter.onchange=renderTokens;query.oninput=renderTokens;renderTokens();
+    byId("filter-reasons").replaceChildren();
     await runScanner({ engine, policy, rules: policy.strategy === 3 ? rules : null, timeframe,
-      copyWallets: policy.strategy === 4 ? copyWallets : null, birdeyeKey, signal: controller.signal, load,
+      copyWallets: policy.strategy === 4 ? copyWallets : null, birdeyeKey, jupiterKey, simulationWallet, signal: controller.signal, load,
+      event(entry) {
+        tokenResults.delete(entry.mint);tokenResults.set(entry.mint,entry);
+        if(tokenResults.size>2000)tokenResults.delete(tokenResults.keys().next().value);
+        renderTokens();
+        const row = document.createElement("li");
+        const label = { found: "Löytyi", approve: "Hyväksytty", watch: "Odottaa", reject: "Hylätty" }[entry.status];
+        row.textContent = `${new Date(entry.at).toLocaleTimeString("fi-FI")} · ${label} · ${entry.mint}${entry.score == null ? "" : ` · strategia ${entry.score}/100`}${entry.quality == null ? "" : ` · laatu ${entry.quality}/100`} · ${entry.reason}`;
+        if (entry.status === "reject") {
+          rejectionReasons.set(entry.reason, (rejectionReasons.get(entry.reason) ?? 0) + 1);
+          byId("filter-reasons").replaceChildren(...[...rejectionReasons].sort((a,b)=>b[1]-a[1]).slice(0,10).map(([reason,count])=>{ const p=document.createElement("p"); p.textContent=`${count} · ${reason}`; return p; }));
+        }
+        const list = byId("scan-events");
+        list.prepend(row);
+        if (list.children.length > 60) list.lastElementChild.remove();
+      },
       commit: (ticks, decide, eligible) => commitScan(ticks, decide, eligible, policy, controller.signal),
       telemetry(stats) {
+      const total = stats.analyzed || 0;
+      byId("filter-summary").textContent = `Analysoidut ${total} · Hyväksytyt ${stats.approved} · Hylätyt ${stats.rejected} · Odottavat ${stats.waiting}`;
+      byId("monitor-summary").textContent = `PumpPortal ${stats.pump} · Työntekijät ${stats.activeWorkers ?? 0}/${stats.adaptiveLimit ?? 0} (max ${stats.workerLimit ?? 24}) · Keskimääräinen analyysierä ${stats.averageAnalysisMs ?? 0} ms`;
+      byId("monitor-sources").replaceChildren(...(stats.sources ?? []).map(source => {
+        const p = document.createElement("p");
+        p.textContent = `${source.name}: ${source.error || (source.busy ? "Haetaan" : "Viimeisin haku: "+source.count)}`;
+        return p;
+      }));
+        const now = Date.now();
+        if (!samples.length || now - samples.at(-1).at >= 1000) samples.push({at:now,found:stats.found,analyzed:stats.analyzed});
+        while (samples.length > 1 && samples[1].at <= now - 60000) samples.shift();
+        const first = samples[0];
+        const elapsed = (now - first.at) / 60000;
+        const rate = key => elapsed >= 0.1 ? Math.round((stats[key] - first[key]) / elapsed) : "–";
         byId("scan-counts").textContent = `Löydetyt ${stats.found} · Analysoidut ${stats.analyzed} · Hylätyt ${stats.rejected} · Hyväksytyt ${stats.approved}`;
-        byId("scan-queue").textContent = `Jono ${stats.queued} · Käsittelyssä ${stats.processing} · Uudelleenhaku ${stats.waiting} · Ohitetut ${stats.dropped} · PumpPortal ${stats.pump}${stats.sourceError ? ` · ${stats.sourceError}` : ""}`;
+        byId("scan-queue").textContent = `Main ${stats.mainQueue ?? 0} · Sniper ${stats.sniperQueue ?? 0} · Löydöt/min ${rate("found")} · Analyysit/min ${rate("analyzed")} · Jono ${stats.queued} · Käsittelyssä ${stats.processing} · Uudelleenhaku ${stats.waiting} · Ohitetut ${stats.dropped} · PumpPortal ${stats.pump}${stats.sourceError ? ` · ${stats.sourceError}` : ""}`;
+        let panel = byId("scan-source-stats");
+        if (!panel) {
+          panel = document.createElement("pre");
+          panel.id = "scan-source-stats";
+          panel.style.whiteSpace = "pre-wrap";
+          byId("scan-queue").after(panel);
+        }
+        panel.textContent = (stats.sources ?? []).map(s => `${s.name}: ${s.count} · ${s.busy ? "Haetaan" : s.error ? "Virhe: " + s.error : "Valmis / odottaa"}`).join("\n");
       },
       report(message, portfolio, ticks) {
         if (controller.signal.aborted) return;
@@ -342,6 +451,11 @@ async function trade(mode) {
     byId("slot").textContent = slot === null ? "Yhdistetään uudelleen…" : String(slot);
   });
   try {
+    if(real){
+      const journal=await reconcileLiveJournal(address,controller.signal);
+      if(journal.some(row=>["reserved","pending","unknown"].includes(row.state)))throw new Error("Live Trading estetty: keskeneräinen transaktio on täsmäytettävä.");
+      if(controller.signal.aborted||wallet!==address||emergency)return;
+    }
     const initial = real ? await live.snapshot(address, controller.signal) :
       await bookUpdate(key);
     if (controller.signal.aborted) return;
@@ -454,6 +568,11 @@ async function liveTick(address, tick, signal, policy, abortSignal, candles) {
   const order = orderFor(engine, resolved, snapshot, tick, policy);
   if (!order || abortSignal.aborted || address !== wallet ||
       document.visibilityState !== "visible") return snapshot;
+  const journal=await reconcileLiveJournal(address,abortSignal);
+  if(journal.some(row=>["reserved","pending","unknown"].includes(row.state)))throw new Error("Keskeneräinen Live-tapahtuma estää uuden kaupan.");
+  if(abortSignal.aborted||address!==wallet||emergency||document.visibilityState!=="visible")return snapshot;
+  // Execution must provide a durable submission lifecycle before it can be enabled.
+  if(!live.journalAware)throw new Error("Live-toteutusadapterin tapahtumakirjanpito puuttuu.");
   return live.execute({ address, order, price: tick.price, signal: abortSignal });
 }
 
@@ -509,7 +628,7 @@ byId("settings").onsubmit = async event => {
     const updated = validateSettings(Object.fromEntries(
       Array.from(new FormData(event.target), ([name, value]) => [name, value === "" ? NaN : Number(value)])
     ));
-    await stored("settings", updated);
+    await stored(settingsKey(), updated);
     settings = updated;
     setButtons();
     byId("status").textContent = "Asetukset tallennettu.";
@@ -518,8 +637,9 @@ byId("settings").onsubmit = async event => {
   }
 };
 
-byId("mode").onchange = () => {
-  if (!run) renderMode().catch(error => stop(error.message));
+byId("mode").onchange = async () => {
+  if (run || signing) return;
+  try { await loadModeSettings(); await renderMode(); } catch (error) { stop(error.message); }
 };
 byId("connect").onclick = async () => {
   const version = viewVersion;
@@ -530,6 +650,8 @@ byId("connect").onclick = async () => {
     const snapshot = await live.snapshot(address, new AbortController().signal);
     if (version === viewVersion && wallet === address && !run) {
       renderLive(snapshot);
+      const journal=await reconcileLiveJournal(address,new AbortController().signal);
+      if(journal.some(row=>["reserved","pending","unknown"].includes(row.state)))logEvent("Live: keskeneräinen tapahtuma vaatii selvityksen.");
       const swaps = await stored(settlementKey(address)) ?? [];
       if (version !== viewVersion || wallet !== address || run) return;
       renderSettlements(swaps);
@@ -537,7 +659,14 @@ byId("connect").onclick = async () => {
         "Lompakko yhdistetty. Live Tradingin toteutusadapteri puuttuu.";
     }
   } catch (error) {
-    if (version === viewVersion && !run) byId("status").textContent = error.message;
+    if (version === viewVersion && !run) {
+      byId("status").textContent = error.message;
+      if (/Phantom-lompakkoa ei löytynyt/.test(error.message)) {
+        const link=document.createElement("a");
+        link.href=live.phantomLink();link.textContent="Avaa Phantom-selaimessa";
+        link.rel="noopener noreferrer";byId("status").append(" ",link);
+      }
+    }
   } finally {
     setButtons();
   }
@@ -763,7 +892,8 @@ try {
   emergency = await stored("emergency-stop") === true;
   devRecord = await stored("devnet-last");
   if (devRecord) byId("devnet-history").textContent = `${devRecord.state} · ${devRecord.signature}`;
-  settings = validateSettings(await stored("settings") ?? {});
+  byId("mode").value = "paper";
+  await loadModeSettings();
   selection = await stored("market") ?? solMarket;
   events = await stored("activity") ?? [];
   const legacyCopyWallet = await stored("copy-wallet");

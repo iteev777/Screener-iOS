@@ -35,41 +35,44 @@ export function candidateQuality(pair, sources, now) {
   return { score: rounded, tier: reject ? "reject" : rounded >= 75 ? "strong" : rounded >= 45 ? "watch" : "weak" };
 }
 
-export function trojanDecision(pair, sources, profile, now) {
+export function trojanDecision(pair, sources, profile, now, settings = {}) {
   const result = (decision, reason, score = 0) => ({ decision, reason, score });
   const sniper = profile === "sniper";
+  const limit=(name,fallback)=>settings[profile+name]??fallback;
   const liquidity = numeric(pair.liquidity?.usd);
   const v24 = numeric(pair.volume?.h24);
   const v5 = numeric(pair.volume?.m5);
   const [m5, h1, h24] = ["m5", "h1", "h24"].map(w => numeric(pair.priceChange?.[w]));
   const created = numeric(pair.pairCreatedAt);
-  if (liquidity === null || v24 === null || liquidity < (sniper ? 2500 : 8000)) {
+  if (liquidity === null || v24 === null || liquidity < limit("MinLiquidity",sniper?2500:8000)) {
     return result("watch", "Odotetaan likviditeettiä tai volyymia");
   }
   if (v24 < 0 || v5 < 0 || [m5, h1, h24].some(v => v !== null && (v < -100 || v > 100000))) {
     return result("reject", "Virheellinen markkinadata");
   }
+  if(v24<limit("MinVolume24",0)||(v5??0)<limit("MinVolume5",0)||sources.size<limit("MinSources",1))return result("watch","Volyymi tai lähdemäärä alle rajan");
+  if(limit("MaxAge",0)>0&&(!created||(now-created)/60000>limit("MaxAge",0)))return result("reject","Poolin ikäraja");
   const five = flow(pair, "m5");
   const short = !five.includes(null);
   const [buys, sells] = short ? five : flow(pair, "h1");
   const total = buys + sells;
   if (![buys, sells].every(v => Number.isSafeInteger(v) && v >= 0) ||
-      total < (short ? sniper ? 3 : 4 : 5) || [m5, h1, h24].includes(null) || m5 <= 0) {
+      total < (short ? limit("MinTrades",sniper?3:4) : limit("MinTradesHour",5)) || [m5, h1, h24].includes(null) || m5 <= limit("MinChange5",0)) {
     return result("watch", "Odotetaan kauppoja ja positiivista 5 min käännettä");
   }
-  if (m5 > 8 || h1 < -25 || h1 > 35 || h24 < -70) return result("reject", "Liian voimakas hintaliike");
-  if (buys <= sells) return result("watch", "Odotetaan ostopainetta");
-  if (v24 / Math.max(liquidity, 1) > 15 || created > now + 300000) {
+  if (m5 > limit("MaxChange5",8) || h1 < limit("MinChange1h",-25) || h1 > limit("MaxChange1h",35) || h24 < limit("MinChange24",-70)) return result("reject", "Liian voimakas hintaliike");
+  if (total<=0) return result("watch", "Odotetaan ostopainetta");
+  if (v24 / Math.max(liquidity, 1) > limit("MaxVolumeRatio",15) || created > now + 300000) {
     return result("reject", "Poikkeava volyymisuhde tai aikaleima");
   }
-  if (created > 0 && (now - created) / 60000 < (sniper ? 0 : 5)) return result("watch", "Odotetaan poolin ikää");
+  if (created > 0 && (now - created) / 60000 < limit("MinAge",sniper?0:5)) return result("watch", "Odotetaan poolin ikää");
   const pressure = buys / total;
-  if (pressure < .52) return result("reject", "Heikko ostopaine");
+  if (pressure < limit("MinPressure",52)/100) return result("reject", "Heikko ostopaine");
   const score = Math.min(100, points(liquidity, [[100000, 25], [50000, 22], [20000, 18], [0, 12]]) +
     points(v5 ?? v24, [[5000, 15], [1000, 11], [100, 7], [0, 3]]) +
     points(pressure, [[.75, 25], [.65, 21], [.58, 16], [.52, 10]]) +
     (m5 <= 2 ? 20 : m5 <= 5 ? 15 : 8) + (h1 >= -12 && h1 <= 8 ? 10 : h1 <= 15 ? 5 : 0) +
     points(sources.size, [[3, 5], [2, 3]]));
-  return result(score >= (sniper ? 75 : 70) ? "approve" : score >= 50 ? "watch" : "reject",
+  return result(score >= limit("MinScore",sniper?75:70) ? "approve" : score >= 50 ? "watch" : "reject",
     "Trojan V2 dip-reversal", score);
 }

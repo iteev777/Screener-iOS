@@ -104,3 +104,25 @@ jobs:
 
       - name: Lint and test
         run: npm run check
+
+  pwa-checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Test and build iPhone PWA
+        run: |
+          rustup target add wasm32-unknown-unknown
+          rustc --edition 2021 --test pwa/engine.rs -o "$RUNNER_TEMP/screener-tests"
+          "$RUNNER_TEMP/screener-tests"
+          bash pwa/package-static.sh "$RUNNER_TEMP/screener-pages"
+          node --test pwa/*.test.mjs
+          cmp LICENSE "$RUNNER_TEMP/screener-pages/LICENSE"
+
+# Run verification for the current development snapshot.

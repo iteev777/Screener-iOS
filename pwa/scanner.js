@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
-import { address, discoverMarkets, fetchCandles, normalizePair, timeframes } from "./markets.js";
-import { fetchJson, rpcCall } from "./network.js";
-import { applyPaperFill, orderFor } from "./policy.js";
+import { address, aggregateCandles, discoverMarkets, fetchCandles, fetchTrojanCandles, normalizePair, timeframes } from "./markets.js";
+import { currentMarket, fetchJson, rpcCall } from "./network.js";
+import { applyPaperFill, orderFor, strategySettings } from "./policy.js";
 import { ruleSignal } from "./rules.js";
 import { copyGroup } from "./copy.js";
 import { candidateQuality, trojanDecision } from "./trojan-analysis.js";
+import { fullRugCheck } from "./trojan-security.js";
+import { analyzeEntryRoute } from "./trojan-entry.js";
+import { verifyPools, verifyPoolReserves, estimateBinSwap, estimateTickSwap } from "./trojan-pools.js";
 import { CandidateQueue, marketBatch, sourcesFor, watchPumpPortal } from "./trojan-discovery.js";
 
 export const scanLimit = 12;
@@ -101,30 +104,40 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
       }
       const book = { sol: 0, cost: 0, ...position, cash: portfolio.cash, realized: portfolio.realized,
         lossToday: portfolio.lossToday, lossDay: portfolio.lossDay, buyDay: portfolio.buyDay, buysToday: portfolio.buysToday, trades: [], count: 0 };
-      const order = orderFor(engine, decide(tick, book), book, tick, policy);
+      const trojan = policy.strategy >= 5;
+      const selectedStrategy = position?.strategy ?? tick.tradeStrategy ?? policy.strategy;
+      const profilePolicy = strategySettings(policy, selectedStrategy);
+      const orderUsd = trojan ? Math.round(Math.min(profilePolicy.orderUsd, book.cash * (policy.balanceFraction ?? 10) / 100) * 100) / 100 : policy.orderUsd;
+      const executionPolicy = trojan ? { ...profilePolicy, orderUsd, lossUsd: policy.lossUsd } : policy;
+      const order = orderFor(engine, decide(tick, book), book, tick, executionPolicy);
       if (exits && order?.side !== "Myynti") continue;
       if (!exits && order?.side === "Myynti") continue;
       const exposure = Object.values(portfolio.positions).reduce((sum, item) => sum + item.cost, 0);
       const duplicate = Object.entries(portfolio.positions).some(([other, item]) =>
         other !== key && item.market.token === tick.token);
-      const buyAllowed = eligible(tick.token) && Number.isFinite(tick.volume) && tick.volume >= (policy.scanMinVolume ?? 10000) && !duplicate &&
+      const positions = Object.values(portfolio.positions);
+      const profileCount = trojan ? positions.filter(item => item.strategy === selectedStrategy).length : 0;
+      const profileAllowed = !trojan || (orderUsd >= 1 &&
+        Boolean(position || (positions.length < (policy.maxTotalPositions ?? 15) && profileCount < (selectedStrategy === 6 ? policy.maxSniperPositions ?? 10 : policy.maxMainPositions ?? 10))));
+      const buyAllowed = profileAllowed && eligible(tick.token) && Number.isFinite(tick.volume) && tick.volume >= (trojan ? policy[(selectedStrategy===6?"sniper":"main")+"MinVolume24"]??10000 : policy.scanMinVolume ?? 10000) && !duplicate &&
         (position || Object.keys(portfolio.positions).length < (policy.maxPools ?? scanLimit)) &&
-        exposure + policy.orderUsd <= policy.exposureUsd;
-      if (order && (exits || (!tick.exitsOnly && buyAllowed))) {
-        applyPaperFill(book, order, tick, policy);
+        exposure + (order?.usd ?? orderUsd) <= policy.exposureUsd;
+      if (order && (exits || (!tick.exitsOnly && buyAllowed &&
+          (tick.routeExpires === undefined || Date.now() <= tick.routeExpires)))) {
+        applyPaperFill(book, order, tick, executionPolicy);
         portfolio.cash = book.cash;
         portfolio.realized = book.realized;
         portfolio.lossToday = book.lossToday;
         portfolio.buyDay = book.buyDay;
         portfolio.buysToday = book.buysToday;
-        portfolio.trades.unshift({ ...book.trades[0], symbol: tick.symbol, token: tick.token, pool: tick.pool });
+        portfolio.trades.unshift({ ...book.trades[0], strategy: selectedStrategy, symbol: tick.symbol, token: tick.token, pool: tick.pool });
         portfolio.trades.length = Math.min(portfolio.trades.length, 200);
       }
       if (book.sol > 0) {
         const { sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool, lastTradeAt } = book;
-        portfolio.positions[key] = { sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool,
+        portfolio.positions[key] = { strategy: selectedStrategy, sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool,
           lastTradeAt, peak: Math.max(book.peak ?? tick.price, tick.price), mark: tick.price,
-          lastTickAt: tick.at, market: { token: tick.token, pool: tick.pool, symbol: tick.symbol } };
+          lastTickAt: tick.at, market: { token: tick.token, pool: tick.pool, symbol: tick.symbol, quoteToken: tick.quoteToken ?? position?.market?.quoteToken } };
       } else if (position) {
         delete portfolio.positions[key];
       }
@@ -146,41 +159,82 @@ export function pause(ms, signal) {
   });
 }
 
-// Single-frame confirmation from Trojan V2 strategy.py / indicators.py.
+// Technical confirmation follows Trojan V2 indicators.py and strategy.py.
 export function technicalEntry(engine, candles) {
-  if (candles.length < 22) return true;
-  const closes = candles.map(candle => candle.close);
-  new Float64Array(engine.memory.buffer, engine.sample_buffer(), closes.length).set(closes);
-  const rsi = engine.indicator(2, closes.length, 14);
+  const recent = candles.slice(-64);
+  if (recent.length < 22) return true;
+  function indicators(rows) {
+    const closes = rows.map(candle => candle.close);
+    new Float64Array(engine.memory.buffer, engine.sample_buffer(), closes.length).set(closes);
+    return { rsi: engine.indicator(2, closes.length, 14),
+      trend: Math.sign(engine.indicator(1, closes.length, 9) - engine.indicator(1, closes.length, 21)) };
+  }
+  const { rsi, trend } = indicators(recent);
   if (rsi < 25 || rsi > 80) return false;
-  const bullish = engine.indicator(1, closes.length, 9) > engine.indicator(1, closes.length, 21);
-  const prior = candles.slice(-21, -1);
-  const averageVolume = prior.reduce((sum, candle) => sum + candle.volume, 0) / 20;
-  const last = candles.at(-1);
-  const breakout = last.close > Math.max(...prior.map(candle => candle.high)) &&
-    averageVolume > 0 && last.volume / averageVolume >= 1.5;
-  return bullish || breakout;
+  const prior = recent.slice(-21, -1);
+  const volume = prior.reduce((sum, candle) => sum + candle.volume, 0) / 20;
+  const last = recent.at(-1);
+  const breakout = last.close > Math.max(...prior.map(candle => candle.high)) && volume > 0 && last.volume / volume >= 1.5;
+  if (trend !== 1 && !breakout) return false;
+  const trends = [trend];
+  const minuteTimes = new Set(candles.map(candle => candle.time));
+  for (const seconds of [180, 300, 900, 1800, 3600, 14400]) {
+    const rows = aggregateCandles(candles, 60, seconds).filter(candle => {
+      if (candle.time < candles[0].time || candle.time + seconds > last.time + 60) return false;
+      for (let offset = 0; offset < seconds; offset += 60) {
+        if (!minuteTimes.has(candle.time + offset)) return false;
+      }
+      return true;
+    });
+    if (rows.length >= 22) trends.push(indicators(rows).trend);
+  }
+  return trends.filter(t => t === -1).length <= trends.filter(t => t === 1).length;
 }
 
 export async function runScanner({ engine, policy, rules, timeframe, copyWallets, birdeyeKey,
-    signal, load, commit, report, telemetry }) {
+    signal, load, commit, report, telemetry, event, jupiterKey, simulationWallet }) {
   const queue = new CandidateQueue();
   const sources = sourcesFor(birdeyeKey).map(source => ({ ...source, due: 0, failures: 0 }));
   const histories = new Map();
   const mintCache = new Map();
   const rugCache = new Map();
+  const routeCache = new Map();
+  let solQuote;
+  let nextJupiter = 0;
+  const publish = (mint, status, reason, score, quality) => {
+    if (!signal.aborted) event?.({ at: Date.now(), mint, status, reason, score, quality });
+  };
+  const add = (tokens, source) => {
+    const discovered = queue.add(tokens, source, Date.now());
+    for (const token of discovered) publish(token, "found", source);
+  };
   let cursors = new Map();
   let pump = "yhdistetään";
   let sourceError = "";
   let processing = 0;
+  const routePending=new Set();
+  let routeActive=0, routeLimit=2;
+  const sellPoolCache=new Map(), sellPoolPending=new Set();
+  const poolCache=new Map(), poolPending=new Set(), rugPending=new Set(), mintPending=new Set();
+  let poolActive=0;
+  let activeWorkers = 0;
+  const workerLimit = Math.max(1, Math.min(24, Math.floor(policy.analysisWorkers ?? 24)));
+  let adaptiveLimit = Math.min(4, workerLimit);
+  let marketCooldown = 0;
+  let nextMarketRequest = 0;
+  let lastScale = 0;
+  let rugActive = 0;
+  let rugCooldown = 0;
+  let analysisMs = 0;
+  let analysisBatches = 0;
   let candleIndex = 0;
   const candles = new Map();
   let approvedTicks = [];
   let copySignals = new Map();
   let copyAt = 0;
   const usedPrices = new Map();
-  const show = () => { if (!signal.aborted) telemetry?.({ ...queue.snapshot(Date.now()), processing, pump, sourceError }); };
-  watchPumpPortal(signal, mint => queue.add([mint], "PumpPortal", Date.now()), status => {
+  const show = () => { if (!signal.aborted) telemetry?.({ ...queue.snapshot(Date.now()), processing, activeWorkers, workerLimit, adaptiveLimit, averageAnalysisMs: analysisBatches ? Math.round(analysisMs / analysisBatches) : 0, pump, sourceError, sources: sources.map(s => ({name:s.name,count:s.count ?? 0,busy:!!s.busy,error:s.error ?? ""})) }); };
+  watchPumpPortal(signal, mint => add([mint], "PumpPortal"), status => {
     pump = status;
     show();
   });
@@ -188,38 +242,57 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   async function discover() {
     while (!signal.aborted) {
       const now = Date.now();
-      const selected = sources.filter(source => source.due <= now)
-        .sort((a, b) => a.due - b.due).slice(0, 2);
-      await Promise.all(selected.map(async source => {
+      const selected = sources.filter(source => !source.busy && source.due <= now)
+        .sort((a, b) => a.due - b.due).slice(0, 9 - sources.filter(s => s.busy).length);
+      for (const source of selected) {
+        source.busy = true;
+        void (async () => {
         try {
           const tokens = await source.load(signal);
-          if (!signal.aborted) queue.add(tokens, source.name, Date.now());
+          if (!signal.aborted) add(tokens, source.name);
           source.failures = 0;
+          source.count = tokens.length;
+          source.error = "";
         } catch (error) {
           if (signal.aborted) return;
           sourceError = `${source.name}: ${error.message}`;
           source.failures++;
+          source.error = error.message;
         } finally {
-          source.due = Date.now() + Math.min(300000, source.interval * 2 ** Math.min(source.failures, 4));
+          source.due = Date.now() + Math.min(Math.max(300000, source.interval), source.interval * 2 ** Math.min(source.failures, 4));
+          if (!source.failures) source.due = Date.now() + source.interval;
+          source.busy = false;
+          show();
         }
-      }));
+        })();
+      }
       show();
       await pause(1000, signal);
     }
   }
 
-  async function analyze() {
+  async function analyze(workerId) {
     let failures = 0;
     while (!signal.aborted) {
       const started = Date.now();
-      const batch = queue.take(started);
-      if (!batch.length) {
-        processing = 0;
-        show();
-        await pause(1000, signal);
+      if (started - lastScale >= 5000 && started >= marketCooldown) {
+        lastScale = started;
+        const demand = Math.max(1, Math.ceil(queue.snapshot(started).queued / 30) + activeWorkers);
+        adaptiveLimit = Math.min(workerLimit, demand, adaptiveLimit + 1);
+      }
+      if (workerId >= adaptiveLimit || started < marketCooldown || started < nextMarketRequest) {
+        await pause(250, signal);
         continue;
       }
-      processing = batch.length;
+      const batch = queue.take(started);
+      if (!batch.length) {
+        show();
+        await pause(500, signal);
+        continue;
+      }
+      nextMarketRequest = started + 350;
+      processing += batch.length;
+      activeWorkers++;
       show();
       try {
         const markets = await marketBatch(batch.map(item => item.token), signal);
@@ -228,60 +301,146 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         const ranked = batch.map(item => {
           const pair = markets.get(item.token);
           const quality = pair && candidateQuality(pair.raw, item.sources, now);
-          const profile = policy.strategy === 6 ? "sniper" : "main";
-          const strategy = policy.strategy >= 5 && pair
-            ? trojanDecision(pair.raw, item.sources, profile, now) : null;
+          let profile = policy.strategy === 6 ? "sniper" : "main";
+          let strategy = policy.strategy >= 5 && pair ? trojanDecision(pair.raw, item.sources, profile, now, policy) : null;
+          if (policy.strategy === 7 && pair && item.sources.has("PumpPortal")) {
+            const sniper = trojanDecision(pair.raw, item.sources, "sniper", now, policy);
+            if (sniper.decision === "approve" || (strategy.decision !== "approve" && sniper.score > strategy.score)) { profile = "sniper"; strategy = sniper; }
+          }
           const decision = !pair || (profile === "sniper" && !item.sources.has("PumpPortal")) ? "watch"
             : quality.tier === "reject" ? "reject" : strategy?.decision ?? "approve";
-          return { item, pair, quality, decision };
+          return { item, pair, quality, decision, strategy, profile };
         }).sort((a, b) => (b.quality?.score ?? 0) - (a.quality?.score ?? 0));
-        for (const cache of [mintCache, rugCache]) {
+        for (const cache of [mintCache, rugCache, routeCache]) {
           for (const [token, value] of cache) if (value.expires <= now) cache.delete(token);
         }
-        const possible = ranked.filter(row => row.decision === "approve");
-        const needMint = possible.filter(row => !mintCache.has(row.item.token)).map(row => row.item.token);
-        try {
+        const possible = ranked.filter(row => row.decision === "approve").sort((a,b)=>((b.strategy?.score??0)+(b.profile==="sniper"?12:0))-((a.strategy?.score??0)+(a.profile==="sniper"?12:0)));
+        for(const [key,value] of poolCache)if(value.expires<=Date.now())poolCache.delete(key);
+        const poolJobs=policy.strategy>=5?possible.filter(({pair})=>!poolCache.has(positionKey(pair.market))&&!poolPending.has(positionKey(pair.market))).slice(0,Math.max(0,2-poolActive)):[];
+        const poolWork=Promise.all(poolJobs.map(async ({pair})=>{
+          const market=pair.market,key=positionKey(market);poolPending.add(key);poolActive++;
+          try{let [pool]=await verifyPools([market],signal);if(pool.status==="approve")pool={...pool,...await verifyPoolReserves(market,signal)};poolCache.set(key,{...pool,expires:Date.now()+8000});}
+          catch(error){poolCache.set(key,{status:"watch",reason:error.message,expires:Date.now()+5000});}
+          finally{poolPending.delete(key);poolActive--;}
+        }));
+        const needMint = possible.filter(row => !mintCache.has(row.item.token)&&!mintPending.has(row.item.token)).map(row => row.item.token);
+        for(const token of needMint)mintPending.add(token);
+        const mintWork=(async()=>{try {
+          if(!needMint.length)return;
           const checked = await scanMints(needMint, signal);
           if (signal.aborted) return;
           for (const token of needMint) mintCache.set(token, { ok: checked.get(token) === true, expires: now + 300000 });
         } catch (error) {
           sourceError = `Minttitarkistus: ${error.message}`;
-        }
+        }finally{for(const token of needMint)mintPending.delete(token);}})();
         const rugCeiling = policy.rugScore || (policy.strategy >= 5 ? 30 : 0);
-        if (rugCeiling > 0 && !signal.aborted) {
-          const needRug = possible.filter(({ item }) => mintCache.get(item.token)?.ok && !rugCache.has(item.token)).slice(0, 2);
+        if (rugCeiling > 0 && !signal.aborted && Date.now() >= rugCooldown) {
+          const needRug = possible.filter(({ item }) => !rugCache.has(item.token) && !rugPending.has(item.token)).slice(0, Math.max(0, Math.min(2, 4 - rugActive)));
+          rugActive += needRug.length;
           await Promise.all(needRug.map(async ({ item }) => {
+            rugPending.add(item.token);
             try {
-              const raw = await fetchJson(`https://api.rugcheck.xyz/v1/tokens/${item.token}/report/summary`, {}, signal);
-              rugCache.set(item.token, { ok: rugEligible(raw, rugCeiling), expires: now + 300000 });
+              const suffix = policy.strategy >= 5 ? "report" : "report/summary";
+              const raw = await fetchJson(`https://api.rugcheck.xyz/v1/tokens/${item.token}/${suffix}`, {}, signal);
+              const check = policy.strategy >= 5 ? fullRugCheck(raw, { scoreLimit: rugCeiling }) : null;
+              rugCache.set(item.token, { ok: check ? check.status === "approve" ? true :
+                check.status === "watch" ? null : false : rugEligible(raw, rugCeiling),
+                reason: check?.reasons.join("; ").slice(0, 200), expires: now + (check?.status === "watch" ? 30000 : 300000) });
             } catch (error) {
               rugCache.set(item.token, { ok: null, expires: now + 30000 });
               sourceError = `RugCheck: ${error.message}`;
-            }
+              if (error.status === 429) rugCooldown = Date.now() + 60000;
+            } finally { rugActive--; rugPending.delete(item.token); }
           }));
+        }
+        await Promise.all([mintWork,poolWork]);
+        if (signal.aborted) return;
+        if (policy.strategy >= 5 && routeActive < routeLimit && Date.now() >= nextJupiter) {
+          const next = possible.find(({ item, pair }) => mintCache.get(item.token)?.ok &&
+            rugCache.get(item.token)?.ok && poolCache.get(positionKey(pair.market))?.expires>Date.now() && !routeCache.has(positionKey(pair.market)) && !routePending.has(positionKey(pair.market)));
+          if (next) {
+            const market = next.pair.market;
+            const routeKey=positionKey(market);
+            routePending.add(routeKey);routeActive++;
+            nextJupiter=Date.now()+2050;
+            try {
+              const pool = poolCache.get(positionKey(market));
+              if(!pool || pool.expires<=Date.now())throw new Error("Poolitarkistus vanhentui");
+              if (pool.status !== "approve") {
+                routeCache.set(positionKey(market), { ...pool, expires: Date.now() + 30000 });
+              } else {
+                if (!solQuote || Date.now() - solQuote.at > 15000) solQuote = await currentMarket(signal);
+                const orderUsd = strategySettings(policy, next.profile === 'sniper' ? 6 : 5).orderUsd;
+                const depth = assessEntryDepth(pool,market,orderUsd,solQuote.price,policy[next.profile+"MaxImpact"]??5);
+                if(depth.status==="reject"||depth.status==="watch"){
+                  routeCache.set(positionKey(market),{...depth,expires:Date.now()+15000});
+                } else {
+                const route = await analyzeEntryRoute(market.token, orderUsd, {
+                  signal, solUsd: solQuote.price, apiKey: jupiterKey, taker: simulationWallet || undefined,
+                  slippageBps: 100
+                });
+                routeCache.set(positionKey(market), { status: route.allowed ? "approve" : "reject",
+                  entryImpactPct: route.impact,
+                  reason: `${pool.protocol} · ${depth.reason} · ${route.reason} (${route.score}/100)${route.simulation ? ` · simulaatio ${route.simulation}` : ""}`,
+                  expires: Date.now() + (route.allowed ? 8000 : 30000) });
+                }
+              }
+            } catch (error) {
+              if(error.status===429 || /429|rate limit/i.test(error.message)){routeLimit=1;nextJupiter=Math.max(nextJupiter,Date.now()+60000);}
+              routeCache.set(positionKey(market), { status: "watch", reason: error.message, expires: Date.now() + 15000 });
+            } finally {
+              routePending.delete(routeKey);routeActive--;
+            }
+          }
         }
         if (signal.aborted) return;
         const candidates = [];
-        for (const { item, pair, decision } of ranked) {
-          const mint = mintCache.get(item.token)?.ok;
-          const rug = rugCeiling > 0 ? rugCache.get(item.token)?.ok : true;
-          const checked = decision !== "approve" ? decision
-            : mint === false || rug === false ? "reject" : mint === true && rug === true ? "approve" : "watch";
+        for (const { item, pair, decision, quality, strategy, profile } of ranked) {
+          const authority = mintCache.get(item.token)?.ok;
+          const report = rugCache.get(item.token);
+          const rug = rugCeiling > 0 ? report?.ok : true;
+          const route = pair && policy.strategy >= 5 ? routeCache.get(positionKey(pair.market)) : null;
+          let checked = decision;
+          let reason = strategy?.reason ?? (pair ? "Markkinadata tarkistettu" : "Poolin hintadata puuttuu");
+          if (decision === "approve") {
+            if (authority === false) { checked = "reject"; reason = "Mintin omistaja tai minttaus-/jäädytysvaltuus"; }
+            else if (rug === false) { checked = "reject"; reason = report.reason || "RugCheck hylkäsi"; }
+            else if (authority !== true || rug !== true) { checked = "watch"; reason = report?.reason || "Odotetaan turvallisuustarkistusta"; }
+            else if (policy.strategy >= 5) {
+              checked = route?.status === "unsupported" ? "watch" : route?.status ?? "watch";
+              reason = route?.reason ?? "Odotetaan pooli- ja Jupiter-analyysiä";
+            }
+          } else if (quality?.tier === "reject") reason = "Virheellinen markkinadata";
+          if (item.decision !== checked || item.reason !== reason) {
+            publish(item.token, checked, reason, strategy?.score, quality?.score);
+          }
+          item.reason = reason;
           queue.finish(item, checked, pair?.raw, now);
-          if (checked === "approve") candidates.push({ ...pair.market, at: now, priority: item.priority });
+          if (checked === "approve") {
+            if (route) item.due = Math.min(item.due, route.expires);
+            candidates.push({ ...pair.market, tradeStrategy: policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: now, priority: item.priority, routeExpires: route?.expires, entryImpactPct: route?.entryImpactPct });
+          }
         }
         approvedTicks = [...candidates, ...approvedTicks.filter(tick => !batch.some(item => item.token === tick.token))]
           .filter(tick => now - tick.at <= maxTickAge)
           .sort((a, b) => b.priority - a.priority).slice(0, 120);
         failures = 0;
       } catch (error) {
-        if (!signal.aborted) sourceError = `Analyysihaku: ${error.message}`;
+        if (!signal.aborted) {
+          sourceError = `Analyysihaku: ${error.message}`;
+          adaptiveLimit = Math.max(1, Math.floor(adaptiveLimit / 2));
+          marketCooldown = Date.now() + (error.status === 429 ? 60000 : 3000);
+        }
         failures++;
       } finally {
-        processing = 0;
+        queue.release(batch, Date.now());
+        processing -= batch.length;
+        activeWorkers--;
+        analysisMs += Date.now() - started;
+        analysisBatches++;
         show();
       }
-      await pause(failures ? Math.min(60000, 3000 * 2 ** Math.min(failures, 5)) : 2000, signal);
+      await pause(failures ? Math.min(60000, 3000 * 2 ** Math.min(failures, 5)) : 500, signal);
     }
   }
 
@@ -294,7 +453,8 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           const stale = current.filter(tick => (candles.get(positionKey(tick))?.fetched ?? 0) + 30000 <= Date.now());
           if (stale.length) {
             const tick = stale[candleIndex++ % stale.length];
-            const data = await fetchCandles(tick, policy.strategy >= 5 ? "1m" : timeframe, signal);
+            const data = policy.strategy >= 5 ? await fetchTrojanCandles(tick, signal)
+              : await fetchCandles(tick, timeframe, signal);
             if (!signal.aborted) candles.set(positionKey(tick), { data, fetched: Date.now() });
           }
         }
@@ -318,14 +478,21 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
       try {
         const portfolio = await load();
         const held = Object.values(portfolio.positions).map(position => position.market);
+        for(const [key,value] of sellPoolCache)if(value.expires<=Date.now())sellPoolCache.delete(key);
+        for(const market of held.filter(m=>m.quoteToken&&!sellPoolCache.has(positionKey(m))&&!sellPoolPending.has(positionKey(m))).slice(0,Math.max(0,2-sellPoolPending.size))){
+          const key=positionKey(market);sellPoolPending.add(key);
+          void verifyPoolReserves(market,signal).then(pool=>{if(!signal.aborted)sellPoolCache.set(key,{...pool,expires:Date.now()+8000});}).catch(()=>{if(!signal.aborted)sellPoolCache.set(key,{expires:Date.now()+10000});}).finally(()=>sellPoolPending.delete(key));
+        }
         const now = Date.now();
-        const candidates = approvedTicks.filter(tick => now >= tick.at && now - tick.at <= maxTickAge);
+        const candidates = approvedTicks.filter(tick => now >= tick.at && now - tick.at <= maxTickAge &&
+          (tick.routeExpires === undefined || now <= tick.routeExpires));
         for (const [key, at] of usedPrices) if (now - at > maxTickAge) usedPrices.delete(key);
         const limit = policy.maxPools ?? scanLimit;
         const selected = universe(portfolio, candidates, limit);
         const heldKeys = new Set(held.map(positionKey));
         const tracked = new Set(selected.map(positionKey));
-        const candidateKeys = new Set(candidates.map(positionKey));
+        const candidateByPool = new Map(candidates.map(item => [positionKey(item), item]));
+        const candidateTokens = new Set(candidates.map(item => item.token));
         const active = tracked;
         for (const cache of [histories, candles]) {
           for (const key of cache.keys()) if (!active.has(key)) cache.delete(key);
@@ -338,9 +505,14 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           priceError = error;
         }
         if (signal.aborted) return;
-        const ticks = [...prices, ...candidates.filter(tick => tracked.has(positionKey(tick)) &&
+        // Prioritize risk exits before computing candidate indicators.
+        if(prices.length && policy.strategy>=5 && !rules && !copyWallets?.length){
+          const exitAt=Date.now();
+          await commit(prices.filter(t=>exitAt>=t.at&&exitAt-t.at<=maxTickAge).map(t=>({...t,sellPool:sellPoolCache.get(positionKey(t)),observedAt:t.at,at:exitAt,exitsOnly:true})),()=>0,()=>false);
+        }
+        const ticks = [...(policy.strategy>=5&&!rules&&!copyWallets?.length?[]:prices), ...candidates.filter(tick => tracked.has(positionKey(tick)) &&
           !heldKeys.has(positionKey(tick)) && usedPrices.get(positionKey(tick)) !== tick.at)];
-        const at = Date.now();
+        const at = Math.max(Date.now(), (portfolio.lastScanAt??0)+1);
         const fresh = ticks.filter(tick => at >= tick.at && at - tick.at <= maxTickAge);
         for (const tick of fresh) {
           const key = positionKey(tick);
@@ -353,10 +525,22 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           for (const tick of fresh) {
             const key = positionKey(tick);
             if (policy.strategy >= 5) {
-              const history = (candles.get(key)?.data ?? []).filter(c => c.time + 60 <= at / 1000);
-              const technicalOk = !history.length || at / 1000 - history.at(-1).time > 180
-                || technicalEntry(engine, history);
-              decisions.set(key, !heldKeys.has(key) && candidateKeys.has(key) && technicalOk ? 1 : 0);
+              if (heldKeys.has(key) || !candidateByPool.has(key)) continue;
+              const snapshot = candles.get(key);
+              let technicalOk = true;
+              if (snapshot) {
+                const closed = snapshot.data.filter(c => c.time + 60 <= at / 1000);
+                const last = closed.at(-1);
+                if (last && at / 1000 - last.time <= 180) {
+                  if (snapshot.lastTechnical !== last.time) {
+                    snapshot.lastTechnical = last.time;
+                    snapshot.technicalOk = technicalEntry(engine, closed);
+                    if (!snapshot.technicalOk) publish(tick.token, "watch", "Tekninen moniaikavälivahvistus ei täyty");
+                  }
+                  technicalOk = snapshot.technicalOk;
+                }
+              }
+              decisions.set(key, technicalOk ? 1 : 0);
               continue;
             }
             const values = histories.get(key).values;
@@ -370,7 +554,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         if (signal.aborted) return;
         const copy = Date.now() - copyAt <= 20000 ? copySignals : new Map();
         const updated = await commit(fresh.map(tick => ({
-          ...tick, observedAt: tick.at, at, exitsOnly: heldKeys.has(positionKey(tick)) && !candidateKeys.has(positionKey(tick))
+          ...tick, observedAt: tick.at, at,
+          tradeStrategy: candidateByPool.get(positionKey(tick))?.tradeStrategy,
+          routeExpires: candidateByPool.get(positionKey(tick))?.routeExpires,
+          entryImpactPct: candidateByPool.get(positionKey(tick))?.entryImpactPct,
+          exitsOnly: heldKeys.has(positionKey(tick)) && !candidateByPool.has(positionKey(tick))
         })), (tick, book) => {
           const key = positionKey(tick);
           if (copyWallets?.length) return copy.get(tick.token) ?? 0;
@@ -381,7 +569,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
             return ruleSignal(rules, { engine, tick, book, candles: available ? completed : [], orderUsd: policy.orderUsd });
           }
           return decisions.get(key) ?? 0;
-        }, token => candidates.some(tick => tick.token === token));
+        }, token => candidateTokens.has(token));
         for (const tick of fresh) {
           if (!heldKeys.has(positionKey(tick)) && Object.hasOwn(updated.positions, positionKey(tick))) {
             usedPrices.set(positionKey(tick), tick.at);
@@ -402,5 +590,26 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
     }
   }
 
-  await Promise.all([discover(), analyze(), enrich(), positions()]);
+  await Promise.all([discover(), ...Array.from({length:workerLimit}, (_, id) => analyze(id)), enrich(), positions()]);
+}
+
+export function assessEntryDepth(pool,market,usd,solUsd,maxImpact=5){
+  if(!["Raydium CLMM","Orca Whirlpool","Meteora DLMM"].includes(pool.protocol))return {status:"pass",reason:"Poolitarkistus"};
+  const sol="So11111111111111111111111111111111111111112";
+  if(market.quoteToken!==sol)return {status:"pass",reason:"Syvyysarvio ei tue vastavaluuttaa; Jupiter tarkistaa reitin"};
+  if(!Number.isFinite(solUsd)||solUsd<=0||!Number.isFinite(usd)||usd<=0||!Number.isInteger(pool.feeBps))return {status:"watch",reason:"Syvyysarvion syöte puuttuu"};
+  // Pool mint order must be known, not inferred from market display order.
+  if(!pool.baseMint||!pool.quoteMint)return {status:"watch",reason:"Poolin minttijärjestys puuttuu"};
+  const xForY=pool.baseMint===sol;
+  if((xForY?pool.quoteMint:pool.baseMint)!==market.token)return {status:"watch",reason:"Poolin mintit eivät täsmää"};
+  const input=BigInt(Math.ceil(usd/solUsd*1e9));
+  const estimate=(pool.protocol==="Meteora DLMM"?estimateBinSwap:estimateTickSwap)(pool,input,xForY,pool.feeBps);
+  if(!estimate.complete)return {status:"watch",reason:"Varmennettu array-syvyys ei riitä"};
+  const decimals=xForY?pool.quote.decimals:pool.base.decimals;
+  const received=Number(estimate.outputRaw)/10**decimals;
+  const expected=Number(input)/1e9*(xForY?pool.spotRatio:1/pool.spotRatio);
+  if(!Number.isFinite(expected)||expected<=0||!Number.isFinite(received)||received<=0)return {status:"watch",reason:"Syvyysarvio virheellinen"};
+  const impact=100*(1-received/expected);
+  if(impact>maxImpact)return {status:"reject",reason:"Arvioitu kokonaiskustannus yli "+maxImpact+" %"};
+  return {status:"pass",reason:"Syvyysarvio "+Math.max(0,impact).toFixed(2)+" %"};
 }
