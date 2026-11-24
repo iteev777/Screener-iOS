@@ -143,7 +143,7 @@ export async function verifyPoolReserves(market, signal) {
   if(fresh.protocol==="Meteora DLMM") Object.assign(pricing,decodeDlmmFeeBound(accountBytes(p)));
   const currentRange=concentratedRange(fresh.protocol,accountBytes(p));
   const arrays=range ? await inspectArrays(fresh.protocol,market.pool,p.owner,currentRange,range,snapshot.value.slice(5+feeKeys.length),arrayKeys) : null;
-  return { status:"approve", protocol:fresh.protocol, slot:snapshot.context.slot, base, quote, ...pricing, range:currentRange, arrays };
+  return { status:"approve", protocol:fresh.protocol, slot:snapshot.context.slot, base, quote, baseMint:encodeKey(fresh.base), quoteMint:encodeKey(fresh.quote), ...pricing, range:currentRange, arrays };
 }
 
 export function poolPricing(protocol, bytes, base, quote) {
