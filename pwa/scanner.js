@@ -217,7 +217,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   let copySignals = new Map();
   let copyAt = 0;
   const usedPrices = new Map();
-  const show = () => { if (!signal.aborted) telemetry?.({ ...queue.snapshot(Date.now()), processing, pump, sourceError }); };
+  const show = () => { if (!signal.aborted) telemetry?.({ ...queue.snapshot(Date.now()), processing, pump, sourceError, sources: sources.map(s => ({name:s.name,count:s.count ?? 0,busy:!!s.busy,error:s.error ?? ""})) }); };
   watchPumpPortal(signal, mint => add([mint], "PumpPortal"), status => {
     pump = status;
     show();
@@ -226,21 +226,30 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   async function discover() {
     while (!signal.aborted) {
       const now = Date.now();
-      const selected = sources.filter(source => source.due <= now)
-        .sort((a, b) => a.due - b.due).slice(0, 2);
-      await Promise.all(selected.map(async source => {
+      const selected = sources.filter(source => !source.busy && source.due <= now)
+        .sort((a, b) => a.due - b.due).slice(0, 9 - sources.filter(s => s.busy).length);
+      for (const source of selected) {
+        source.busy = true;
+        void (async () => {
         try {
           const tokens = await source.load(signal);
           if (!signal.aborted) add(tokens, source.name);
           source.failures = 0;
+          source.count = tokens.length;
+          source.error = "";
         } catch (error) {
           if (signal.aborted) return;
           sourceError = `${source.name}: ${error.message}`;
           source.failures++;
+          source.error = error.message;
         } finally {
           source.due = Date.now() + Math.min(300000, source.interval * 2 ** Math.min(source.failures, 4));
+          if (!source.failures) source.due = Date.now() + source.interval;
+          source.busy = false;
+          show();
         }
-      }));
+        })();
+      }
       show();
       await pause(1000, signal);
     }
