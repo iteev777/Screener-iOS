@@ -100,8 +100,9 @@ export async function verifyPoolReserves(market, signal) {
   const decoded = decodePool(account?.owner, accountBytes(account));
   if (decoded.status !== "decoded" || !decoded.baseVault || !decoded.quoteVault || !decoded.base || !decoded.quote) return { status:"watch", reason:"Reservirakenne ei ole tuettu" };
   const keys = [decoded.baseVault, decoded.quoteVault, decoded.base, decoded.quote].map(encodeKey);
-  const snapshot = await rpcCall("getMultipleAccounts", [[market.pool, ...keys], options], signal);
-  const [p, v1, v2, m1, m2] = snapshot?.value ?? [];
+  const feeKeys = decoded.protocol === "PumpSwap" ? ["ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw","5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"] : [];
+  const snapshot = await rpcCall("getMultipleAccounts", [[market.pool, ...keys, ...feeKeys], options], signal);
+  const [p, v1, v2, m1, m2, globalConfig, feeConfig] = snapshot?.value ?? [];
   if (p?.owner !== account.owner) throw new Error("Poolin omistaja vaihtui");
   const fresh = decodePool(p.owner, accountBytes(p));
   if (fresh.status !== "decoded" || !["baseVault","quoteVault","base","quote"].every(k => fresh[k] && equal(fresh[k], decoded[k]))) throw new Error("Poolin rakenne vaihtui");
@@ -110,6 +111,12 @@ export async function verifyPoolReserves(market, signal) {
   const requested = publicKeyBytes(market.token), other = publicKeyBytes(market.quoteToken);
   if (!((equal(fresh.base,requested) && equal(fresh.quote,other)) || (equal(fresh.quote,requested) && equal(fresh.base,other)))) throw new Error("Poolin markkinapari vaihtui");
   const pricing = poolPricing(fresh.protocol, accountBytes(p), base, quote);
+  if (fresh.protocol === "PumpSwap") {
+    if (globalConfig?.owner !== p.owner || feeConfig?.owner !== "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ") throw new Error("PumpSwap palkkiotilien omistaja ei täsmää");
+    const global = accountBytes(globalConfig);
+    if (global.length < 321 || !equal(global.subarray(0,8),[149,8,156,202,160,252,176,217])) throw new Error("PumpSwap global config virheellinen");
+    pricing.feeBps = decodePumpFees(accountBytes(feeConfig));
+  }
   return { status:"approve", protocol:fresh.protocol, slot:snapshot.context.slot, base, quote, ...pricing };
 }
 
@@ -133,4 +140,25 @@ export function poolPricing(protocol, bytes, base, quote) {
   else { ratio=Number(b)/Number(a)*scale; }
   if (!Number.isFinite(ratio)||ratio<=0 || (feeBps!==null && (!Number.isFinite(feeBps)||feeBps<0||feeBps>=10000))) throw new Error("Virheellinen poolihinta tai palkkio");
   return { priceMode:mode, spotRatio:ratio, feeBps, effectiveBaseRaw:a.toString(), effectiveQuoteRaw:b.toString() };
+}
+
+export function decodePumpFees(raw) {
+  if (raw.length < 69 || !equal(raw.subarray(0,8),[143,52,146,187,219,123,76,155])) throw new Error("PumpSwap fee config virheellinen");
+  const view = new DataView(raw.buffer,raw.byteOffset,raw.byteLength);
+  const fees = offset => {
+    if (offset+24>raw.length) throw new Error("Palkkiotaulukko katkennut");
+    const rates=[0,8,16].map(i=>Number(view.getBigUint64(offset+i,true)));
+    if (rates.some(n=>n>10000)) throw new Error("Palkkio virheellinen");
+    return rates.reduce((a,b)=>a+b,0);
+  };
+  let cursor=65, max=fees(41);
+  for(let group=0;group<2;group++){
+    if(cursor+4>raw.length) throw new Error("Palkkiotasot puuttuvat");
+    const count=view.getUint32(cursor,true);cursor+=4;
+    if(count>128) throw new Error("Liikaa palkkiotasoja");
+    for(let i=0;i<count;i++){max=Math.max(max,fees(cursor+16));cursor+=40;}
+  }
+  max=Math.max(max,fees(cursor));
+  if(max>=10000) throw new Error("Palkkio kuluttaa koko kaupan");
+  return max;
 }
