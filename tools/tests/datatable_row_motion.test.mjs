@@ -89,7 +89,7 @@ async function openBook(t) {
       if (this.matches?.("#positions-root tbody tr")) {
         const id = this.getAttribute("data-row-id") ?? this.getAttribute("data-dt-leaving-id");
         const properties = Object.keys(keyframes?.[0] ?? {}).filter((key) => key !== "offset");
-        window.__animated.push({ id, properties });
+        window.__animated.push({ id, properties, rowIds: [...document.querySelectorAll("#positions-root tbody tr")].map((tr) => tr.getAttribute("data-row-id") ?? `leaving:${tr.getAttribute("data-dt-leaving-id")}`), ariaHidden: this.getAttribute("aria-hidden") });
       }
       return animate.call(this, keyframes, options);
     };
@@ -146,26 +146,22 @@ test("a row that arrives fades in and the rows below slide, keeping their nodes"
 test("a row that leaves fades in place, then the rows below close its gap", async (t) => {
   const { page, book } = await openBook(t);
 
-  await page.evaluate(() => {
-    window.__leavingSnapshot = null;
-    const animate = window.Element.prototype.animate;
-    window.Element.prototype.animate = function (...args) {
-      if (this.matches('#positions-root tr[data-dt-leaving-id="101"]')) {
-        window.__leavingSnapshot = {
-          ids: [...this.parentElement.children].map(tr => tr.getAttribute("data-row-id") ?? "leaving:" + tr.getAttribute("data-dt-leaving-id")),
-          hidden: this.getAttribute("aria-hidden")
-        };
-      }
-      return animate.apply(this, args);
-    };
-  });
   book.open = book.open.filter((row) => row.id !== 101);
-  await page.waitForFunction(() => window.__leavingSnapshot !== null);
-  const snapshot = await page.evaluate(() => window.__leavingSnapshot);
-  assert.deepEqual(snapshot.ids, ["100", "leaving:101", "102"], "it fades where it stood");
-  assert.equal(snapshot.hidden, "true");
+  // The exit lasts only 220ms; capture its state synchronously at animation start
+  // rather than racing Playwright's polling against a busy CI browser.
+  await page.waitForFunction(() => window.__animated.some(
+    (m) => m.id === "101" && m.properties.includes("opacity")
+  ));
+  const fade = await page.evaluate(() => window.__animated.find(
+    (m) => m.id === "101" && m.properties.includes("opacity")
+  ));
+  assert.deepEqual(fade.rowIds, ["100", "leaving:101", "102"], "it fades where it stood");
+  assert.equal(fade.ariaHidden, "true");
 
-  await page.waitForFunction(() => !document.querySelector("#positions-root tr.dt-row-leaving"));
+  await page.waitForFunction(() =>
+    !document.querySelector("#positions-root tr.dt-row-leaving") &&
+    window.__animated.some((m) => m.id === "102" && m.properties.includes("translate"))
+  );
   assert.deepEqual(await rowIds(page), ["100", "102"]);
   const slid = (await animated(page)).filter((m) => m.properties.includes("translate"));
   assert.ok(
