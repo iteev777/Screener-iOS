@@ -1,5 +1,5 @@
 export const defaults = Object.freeze({
-mainOrderUsd: 5, mainStop: 9, mainProfit: 8, mainProfitShare: 50, mainFinalProfit: 10, mainTrailing: 3.5, mainBreakEven: 4, mainHoldMinutes: 15, mainDca: 0, mainDcaDrop: 5, sniperOrderUsd: 5, sniperStop: 9, sniperProfit: 8, sniperProfitShare: 50, sniperFinalProfit: 10, sniperTrailing: 3.5, sniperBreakEven: 4, sniperHoldMinutes: 15, sniperDca: 0, sniperDcaDrop: 5,
+mainOrderUsd: 5, mainStop: 9, mainProfit: 8, mainProfitShare: 50, mainFinalProfit: 10, mainTrailing: 3.5, mainBreakEven: 0, mainHoldMinutes: 15, mainDca: 0, mainDcaDrop: 5, sniperOrderUsd: 5, sniperStop: 9, sniperProfit: 8, sniperProfitShare: 50, sniperFinalProfit: 10, sniperTrailing: 3.5, sniperBreakEven: 0, sniperHoldMinutes: 15, sniperDca: 0, sniperDcaDrop: 5,
 
   analysisWorkers: 24, maxMainPositions: 10, maxSniperPositions: 10, maxTotalPositions: 15, balanceFraction: 10, dcaDrop: 3,
   strategy: 0, orderUsd: 100, exposureUsd: 200, lossUsd: 50, stop: 5, profit: 10, profitShare: 100, finalProfit: 20,
@@ -41,7 +41,7 @@ export function validateSettings(input) {
 export function strategySettings(policy, strategy) {
   if (strategy !== 5 && strategy !== 6) return policy;
   const prefix = strategy === 5 ? 'main' : 'sniper';
-  const result = {...policy};
+  const result = {...policy, trojanExit: true};
   for (const name of ["orderUsd","stop","profit","profitShare","finalProfit","trailing","breakEven","holdMinutes","dca","dcaDrop"]) { const k = prefix + name[0].toUpperCase() + name.slice(1); result[name] = policy[k] ?? policy[name]; }
   return result;
 }
@@ -49,12 +49,26 @@ export function strategySettings(policy, strategy) {
 export const reasons = ["", "Stop loss", "Break-even", "Trailing stop", "Aikaraja",
   "Take profit", "Strategia", "Lisäosto"];
 
+export function trojanExitReason(book, tick, settings) {
+  const entry = book.cost / book.sol;
+  const change = tick.price / entry - 1;
+  const peak = Math.max(entry, book.peak ?? entry, tick.price);
+  const peakGain = peak / entry - 1;
+  if (change <= -settings.stop / 100) return 1;
+  if (!book.profitTaken && change >= settings.profit / 100) return 5;
+  if (peakGain >= 0.04 && change > 0 && tick.price <= peak * (1 - settings.trailing / 100) && settings.trailing > 0) return 3;
+  if (settings.breakEven > 0 && peakGain >= settings.breakEven / 100 && change <= 0) return 2;
+  if (change >= settings.finalProfit / 100) return 5;
+  if (tick.at - (book.openedAt ?? tick.at) >= settings.holdMinutes * 60000) return 4;
+  return 0;
+}
+
 export function orderFor(engine, signal, book, tick, settings) {
   const { price, at, liquidity } = tick;
   const held = book.sol > 0;
   if (held) {
     const average = book.cost / book.sol;
-    const exit = engine.exit(price, average, Math.max(book.peak ?? price, price),
+    const exit = settings.trojanExit ? trojanExitReason(book, tick, settings) : engine.exit(price, average, Math.max(book.peak ?? price, price),
       Math.max(0, (at - (book.openedAt ?? at)) / 1000), settings.stop,
       book.profitTaken ? settings.finalProfit : settings.profit, settings.trailing, settings.breakEven, settings.holdMinutes * 60, signal);
     if (exit) {
@@ -67,12 +81,13 @@ export function orderFor(engine, signal, book, tick, settings) {
   const buys = book.buyDay === day ? book.buysToday ?? 0 : 0;
   const dca = held && settings.dca && !book.added && !book.profitTaken && signal === 1 &&
     price <= (book.cost / book.sol) * (1 - settings.dcaDrop / 100) && price > (book.cost / book.sol) * (1 - settings.stop / 100);
+  const buyUsd = dca && settings.trojanExit ? Math.min(2.5, settings.orderUsd) : settings.orderUsd;
   if (((!held && signal === 1) || dca) && loss < settings.lossUsd &&
       buys < settings.maxDailyBuys &&
       liquidity >= settings.minLiquidity &&
       at >= (book.lastTradeAt ?? 0) + settings.cooldownSeconds * 1000 &&
-      book.cash >= settings.orderUsd && (held ? book.cost : 0) + settings.orderUsd <= settings.exposureUsd) {
-    return { side: "Osto", usd: settings.orderUsd, reason: dca ? 7 : 6 };
+      book.cash >= buyUsd && (held ? book.cost : 0) + buyUsd <= settings.exposureUsd) {
+    return { side: "Osto", usd: buyUsd, reason: dca ? 7 : 6 };
   }
 }
 
