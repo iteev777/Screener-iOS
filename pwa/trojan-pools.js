@@ -71,3 +71,40 @@ export async function verifyPools(rows, signal) {
       reason: matches ? `${decoded.protocol}: poolitili ja mintit varmennettu` : "Poolitilin mintit eivät vastaa markkinaparia" };
   });
 }
+
+const tokenPrograms = new Set(["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"]);
+function accountBytes(account) {
+  if (!account || account.executable !== false || account.data?.[1] !== "base64") throw new Error("Virheellinen reservitili");
+  return Uint8Array.from(atob(account.data[0]), ch => ch.charCodeAt(0));
+}
+function encodeKey(bytes) {
+  const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  let n = 0n, out = "", zeros = 0;
+  for (const b of bytes) n = n * 256n + BigInt(b);
+  while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+  while (n) { out = alphabet[Number(n % 58n)] + out; n /= 58n; }
+  return "1".repeat(zeros) + out;
+}
+export function decodeReserve(vault, mint, expected) {
+  if (!tokenPrograms.has(vault?.owner) || vault.owner !== mint?.owner) throw new Error("Reservin tokenohjelma ei täsmää");
+  const v = accountBytes(vault), m = accountBytes(mint);
+  if (v.length < 165 || m.length < 82 || !equal(v.subarray(0,32), expected) || v[108] !== 1 || m[45] !== 1) throw new Error("Reservin mintti tai tila ei kelpaa");
+  const raw = new DataView(v.buffer, v.byteOffset, v.byteLength).getBigUint64(64,true);
+  if (!raw) throw new Error("Tyhjä reservi");
+  return { raw: raw.toString(), decimals: m[44], amount: Number(raw) / 10 ** m[44] };
+}
+export async function verifyPoolReserves(market, signal) {
+  const options = { commitment:"confirmed", encoding:"base64" };
+  const first = await rpcCall("getMultipleAccounts", [[market.pool], options], signal);
+  const account = first?.value?.[0];
+  const decoded = decodePool(account?.owner, accountBytes(account));
+  if (decoded.status !== "decoded" || !decoded.baseVault || !decoded.quoteVault || !decoded.base || !decoded.quote) return { status:"watch", reason:"Reservirakenne ei ole tuettu" };
+  const keys = [decoded.baseVault, decoded.quoteVault, decoded.base, decoded.quote].map(encodeKey);
+  const snapshot = await rpcCall("getMultipleAccounts", [[market.pool, ...keys], options], signal);
+  const [p, v1, v2, m1, m2] = snapshot?.value ?? [];
+  if (p?.owner !== account.owner) throw new Error("Poolin omistaja vaihtui");
+  const fresh = decodePool(p.owner, accountBytes(p));
+  if (fresh.status !== "decoded" || !["baseVault","quoteVault","base","quote"].every(k => fresh[k] && equal(fresh[k], decoded[k]))) throw new Error("Poolin rakenne vaihtui");
+  const base = decodeReserve(v1,m1,fresh.base), quote = decodeReserve(v2,m2,fresh.quote);
+  return { status:"approve", protocol:fresh.protocol, slot:snapshot.context?.slot, base, quote, reserveRatio:quote.amount/base.amount };
+}
