@@ -84,6 +84,11 @@
 <label>Skannauksen RugCheck-enimmäispisteet (0 = pois)<input name="rugScore" type="number" step="1" min="0" max="100" required></label>
 <label>Ostoja enintään UTC-päivässä<input name="maxDailyBuys" type="number" min="1" max="100" required></label>
 <label>Skannauksen 24 h vähimmäisvolyymi, USD<input name="scanMinVolume" type="number" min="0" step="any" required></label>
+<label>Main-positioiden enimmäismäärä<input name="maxMainPositions" type="number" min="1" max="30" required></label>
+<label>Sniper-positioiden enimmäismäärä<input name="maxSniperPositions" type="number" min="1" max="30" required></label>
+<label>Positioita yhteensä<input name="maxTotalPositions" type="number" min="1" max="30" required></label>
+<label>Oston enimmäisosuus käteisestä, %<input name="balanceFraction" type="number" min="1" max="100" step="any" required></label>
+<label>Lisäoston hinnanlasku, %<input name="dcaDrop" type="number" min="0.1" max="49" step="any" required></label>
 <button>Tallenna asetukset</button>
 </fieldset>
 </form></details>
