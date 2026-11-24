@@ -212,7 +212,8 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   let pump = "yhdistetään";
   let sourceError = "";
   let processing = 0;
-  let routeBusy = false;
+  const routePending=new Set();
+  let routeActive=0, routeLimit=2;
   const poolCache=new Map(), poolPending=new Set(), rugPending=new Set();
   let poolActive=0;
   let activeWorkers = 0;
@@ -351,12 +352,14 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         }
         await Promise.all([mintWork,poolWork]);
         if (signal.aborted) return;
-        if (policy.strategy >= 5 && !routeBusy && Date.now() >= nextJupiter) {
+        if (policy.strategy >= 5 && routeActive < routeLimit && Date.now() >= nextJupiter) {
           const next = possible.find(({ item, pair }) => mintCache.get(item.token)?.ok &&
-            rugCache.get(item.token)?.ok && poolCache.has(positionKey(pair.market)) && !routeCache.has(positionKey(pair.market)));
+            rugCache.get(item.token)?.ok && poolCache.get(positionKey(pair.market))?.expires>Date.now() && !routeCache.has(positionKey(pair.market)) && !routePending.has(positionKey(pair.market)));
           if (next) {
             const market = next.pair.market;
-            routeBusy = true;
+            const routeKey=positionKey(market);
+            routePending.add(routeKey);routeActive++;
+            nextJupiter=Date.now()+2050;
             try {
               const pool = poolCache.get(positionKey(market));
               if(!pool || pool.expires<=Date.now())throw new Error("Poolitarkistus vanhentui");
@@ -379,10 +382,10 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
                 }
               }
             } catch (error) {
+              if(error.status===429 || /429|rate limit/i.test(error.message)){routeLimit=1;nextJupiter=Math.max(nextJupiter,Date.now()+60000);}
               routeCache.set(positionKey(market), { status: "watch", reason: error.message, expires: Date.now() + 15000 });
             } finally {
-              nextJupiter = Date.now() + 2050;
-              routeBusy = false;
+              routePending.delete(routeKey);routeActive--;
             }
           }
         }
