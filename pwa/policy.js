@@ -7,7 +7,7 @@ export const defaults = Object.freeze({
 
 const limits = {
   maxMainPositions: [1,30], maxSniperPositions: [1,30], maxTotalPositions: [1,30], balanceFraction: [1,100], dcaDrop: [0.1,49],
-  strategy: [0, 6], orderUsd: [1, 500], exposureUsd: [1, 1000], lossUsd: [1, 1000],
+  strategy: [0, 7], orderUsd: [1, 500], exposureUsd: [1, 1000], lossUsd: [1, 1000],
   stop: [0.1, 50], profit: [0.1, 500], profitShare: [1, 100], finalProfit: [0.1, 500], trailing: [0, 50], breakEven: [0, 100],
   holdMinutes: [1, 1440], cooldownSeconds: [0, 3600], feeBps: [0, 500],
   slippageBps: [0, 500], dca: [0, 1], interval: [15, 300], minLiquidity: [0, 1e9], rugScore: [0, 100], maxPools: [1, 30], maxDailyBuys: [1, 100], scanMinVolume: [0, 1e9]
