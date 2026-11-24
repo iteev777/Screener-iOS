@@ -13,7 +13,7 @@
 <body>
 <main>
 <header><p>Solana · Kaupankäynti</p><h1>Screener iOS</h1></header>
-<nav id="dashboard-nav" aria-label="Dashboard"><button type="button" data-view="home" aria-pressed="true">Home</button><button type="button" data-view="tokens">Tokens</button><button type="button" data-view="positions">Positions</button><button type="button" data-view="trader">Trader</button><button type="button" data-view="settings">Settings</button></nav>
+<nav id="dashboard-nav" aria-label="Dashboard"><button type="button" data-view="home" aria-pressed="true">Home</button><button type="button" data-view="tokens">Tokens</button><button type="button" data-view="positions">Positions</button><button type="button" data-view="trader">Trader</button><button type="button" data-view="filtering">Filtering</button><button type="button" data-view="monitoring">Monitoring</button><button type="button" data-view="settings">Settings</button></nav>
 <section class="trade-console" aria-label="Kaupankäynnin hallinta">
 <div class="console-head">
 <label for="mode">Kaupankäyntitila</label><span id="run-state" aria-live="polite">Pysäytetty</span>
@@ -49,6 +49,8 @@
 <button id="devnet-sync" type="button" disabled>Tarkista Devnet-vahvistus</button>
 </div><p id="devnet-status" role="status"></p><p id="devnet-history"></p>
 </details>
+<section data-page="filtering"><h2>Filtering status</h2><p id="filter-summary">Odotetaan skannausta.</p><div id="filter-reasons"></div></section>
+<section data-page="monitoring"><h2>Service status</h2><p id="monitor-summary">Odotetaan skannausta.</p><div id="monitor-sources"></div></section>
 <details id="scan-panel" data-page="tokens"><summary>Automaattinen Paper-salkku</summary>
 <p id="scan-status" role="status"></p>
 <p id="scan-counts">Löydetyt 0 · Analysoidut 0 · Hylätyt 0 · Hyväksytyt 0</p>
@@ -150,7 +152,7 @@
 <div class="controls"><button>Hae hinta-arvio</button>
 <button id="simulate-swap" value="simulate" disabled>Muodosta ja simuloi swap</button></div>
 </form><p id="quote-result" role="status"></p></section>
-<details data-page="home"><summary>Botin toimintaloki</summary><ol id="activity"></ol></details>
+<details data-page="monitoring"><summary>Botin toimintaloki</summary><ol id="activity"></ol></details>
 <footer><a href="./LICENSE">Alkuperäinen lisenssi · BUSL-1.1</a></footer>
 </main>
 <script type="module" src="./app.js"></script>
