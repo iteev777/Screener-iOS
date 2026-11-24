@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 import { address, aggregateCandles, discoverMarkets, fetchCandles, fetchTrojanCandles, normalizePair, timeframes } from "./markets.js";
 import { currentMarket, fetchJson, rpcCall } from "./network.js";
-import { applyPaperFill, orderFor } from "./policy.js";
+import { applyPaperFill, orderFor, strategySettings } from "./policy.js";
 import { ruleSignal } from "./rules.js";
 import { copyGroup } from "./copy.js";
 import { candidateQuality, trojanDecision } from "./trojan-analysis.js";
@@ -106,8 +106,9 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
         lossToday: portfolio.lossToday, lossDay: portfolio.lossDay, buyDay: portfolio.buyDay, buysToday: portfolio.buysToday, trades: [], count: 0 };
       const trojan = policy.strategy >= 5;
       const selectedStrategy = position?.strategy ?? tick.tradeStrategy ?? policy.strategy;
-      const orderUsd = trojan ? Math.round(Math.min(policy.orderUsd, book.cash * (policy.balanceFraction ?? 10) / 100) * 100) / 100 : policy.orderUsd;
-      const executionPolicy = trojan ? { ...policy, orderUsd, lossUsd: policy.lossUsd } : policy;
+      const profilePolicy = strategySettings(policy, selectedStrategy);
+      const orderUsd = trojan ? Math.round(Math.min(profilePolicy.orderUsd, book.cash * (policy.balanceFraction ?? 10) / 100) * 100) / 100 : policy.orderUsd;
+      const executionPolicy = trojan ? { ...profilePolicy, orderUsd, lossUsd: policy.lossUsd } : policy;
       const order = orderFor(engine, decide(tick, book), book, tick, executionPolicy);
       if (exits && order?.side !== "Myynti") continue;
       if (!exits && order?.side === "Myynti") continue;
@@ -335,7 +336,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
                 routeCache.set(positionKey(market), { ...pool, expires: Date.now() + 30000 });
               } else {
                 if (!solQuote || Date.now() - solQuote.at > 15000) solQuote = await currentMarket(signal);
-                const route = await analyzeEntryRoute(market.token, policy.orderUsd, {
+                const route = await analyzeEntryRoute(market.token, strategySettings(policy, next.profile === 'sniper' ? 6 : 5).orderUsd, {
                   signal, solUsd: solQuote.price, apiKey: jupiterKey, taker: simulationWallet || undefined,
                   slippageBps: 100
                 });
