@@ -27,12 +27,18 @@ test("discovery merges sources and retries incomplete metadata outside the pool 
   queue.add([mint, mint, pool], "Latest Profiles", now);
   queue.add([mint], "PumpPortal", now);
   assert.equal(queue.snapshot(now).found, 2);
-  const entry = queue.take(now).find(item => item.token === mint);
+  const batch = queue.take(now);
+  const entry = batch.find(item => item.token === mint);
+  assert.equal(queue.take(now).length, 0, 'reserved tokens cannot be claimed twice');
   assert.deepEqual([...entry.sources], ["Latest Profiles", "PumpPortal"]);
   queue.finish(entry, "watch", undefined, now);
   assert.equal(queue.snapshot(now).waiting, 1);
-  assert.equal(queue.take(now + 9999).length, 1);
-  assert.equal(queue.take(now + 10000).length, 2);
+  assert.equal(queue.take(now + 9999).length, 0);
+  queue.release(batch, now);
+  const retry = queue.take(now + 9999);
+  assert.equal(retry.length, 1);
+  assert.equal(retry[0].token, pool);
+  assert.deepEqual(queue.take(now + 10000).map(item => item.token), [mint]);
 });
 
 test("browser adapters choose highest-liquidity Solana base pair and configure all sources", async t => {
@@ -42,5 +48,5 @@ test("browser adapters choose highest-liquidity Solana base pair and configure a
   });
   assert.equal((await marketBatch([mint])).get(mint).market.liquidity, 51000);
   assert.deepEqual(sourcesFor("key").map(source => source.name), ["Latest Profiles", "Latest Boosts",
-    "Top Boosts", "Community Takeovers", "GeckoTerminal new_pools", "GeckoTerminal trending_pools", "Birdeye"]);
+    "Top Boosts", "Community Takeovers", "GeckoTerminal new_pools", "GeckoTerminal trending_pools", "Birdeye", "RugCheck new_tokens", "RugCheck recent", "RugCheck trending", "RugCheck verified", "Jupiter recent", "Jupiter toporganicscore/1h?limit=100", "Jupiter toptraded/1h?limit=100", "Jupiter toptrending/1h?limit=100", "CoinGecko", "DeFiLlama", "Birdeye Meme Listing"]);
 });
