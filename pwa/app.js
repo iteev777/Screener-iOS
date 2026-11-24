@@ -451,6 +451,11 @@ async function trade(mode) {
     byId("slot").textContent = slot === null ? "Yhdistetään uudelleen…" : String(slot);
   });
   try {
+    if(real){
+      const journal=await reconcileLiveJournal(address,controller.signal);
+      if(journal.some(row=>["reserved","pending","unknown"].includes(row.state)))throw new Error("Live Trading estetty: keskeneräinen transaktio on täsmäytettävä.");
+      if(controller.signal.aborted||wallet!==address||emergency)return;
+    }
     const initial = real ? await live.snapshot(address, controller.signal) :
       await bookUpdate(key);
     if (controller.signal.aborted) return;
@@ -563,6 +568,11 @@ async function liveTick(address, tick, signal, policy, abortSignal, candles) {
   const order = orderFor(engine, resolved, snapshot, tick, policy);
   if (!order || abortSignal.aborted || address !== wallet ||
       document.visibilityState !== "visible") return snapshot;
+  const journal=await reconcileLiveJournal(address,abortSignal);
+  if(journal.some(row=>["reserved","pending","unknown"].includes(row.state)))throw new Error("Keskeneräinen Live-tapahtuma estää uuden kaupan.");
+  if(abortSignal.aborted||address!==wallet||emergency||document.visibilityState!=="visible")return snapshot;
+  // Execution must provide a durable submission lifecycle before it can be enabled.
+  if(!live.journalAware)throw new Error("Live-toteutusadapterin tapahtumakirjanpito puuttuu.");
   return live.execute({ address, order, price: tick.price, signal: abortSignal });
 }
 
