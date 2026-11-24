@@ -7,6 +7,11 @@ export function createLiveAdapter(execution) {
   let standard;
   let walletChange;
   let unsubscribe;
+  let connectedAddress;
+  let generation=0;
+  let boundProvider;
+  const invalidate=()=>{generation++;connectedAddress=undefined;walletChange?.();};
+  function bindProvider(provider){if(!provider||boundProvider===provider)return;boundProvider?.removeListener?.("accountChanged",invalidate);boundProvider?.removeListener?.("disconnect",invalidate);boundProvider=provider;provider.on?.("accountChanged",invalidate);provider.on?.("disconnect",invalidate);}
   const signingWallets = () => wallets().filter(wallet =>
     wallet.features["standard:connect"] && wallet.features["solana:signTransaction"]
   );
@@ -15,6 +20,8 @@ export function createLiveAdapter(execution) {
       typeof execution?.readBook === "function",
     execute: execution?.execute,
     async connect() {
+      const attempt=++generation;
+      connectedAddress=undefined;
       unsubscribe?.();
       unsubscribe = undefined;
       standard = undefined;
@@ -27,8 +34,10 @@ export function createLiveAdapter(execution) {
         publicKeyBytes(address);
         standard = selected;
         unsubscribe = selected.features["standard:events"]?.on("change", event => {
-          if (event.accounts) walletChange?.();
+          if (event.accounts) invalidate();
         });
+        if(attempt!==generation)throw new Error("Lompakkoyhteys muuttui");
+        connectedAddress=address;
         return address;
       }
       if (candidates.length > 1 && !provider?.isPhantom) {
@@ -37,22 +46,30 @@ export function createLiveAdapter(execution) {
       if (!provider?.isPhantom) {
         throw new Error("Phantom-lompakkoa ei löytynyt. Avaa sovellus Phantom-lompakon omassa selaimessa.");
       }
+      bindProvider(provider);
       const result = await provider.connect();
       const address = result.publicKey.toString();
       publicKeyBytes(address);
+      if(attempt!==generation)throw new Error("Lompakkoyhteys muuttui");
+      connectedAddress=address;
       return address;
     },
     onWalletChange(callback) {
       walletChange = callback;
-      getProvider()?.on("accountChanged", callback);
-      getProvider()?.on("disconnect", callback);
+      bindProvider(getProvider());
     },
-    canSign() { return Boolean(standard); },
+    canSign() { return Boolean(standard && connectedAddress); },
+    assertConnected(address){if(!connectedAddress||address!==connectedAddress)throw new Error("Lompakkoyhteys ei ole enää voimassa");return generation;},
     phantomLink(url=globalThis.location?.href) {
       const target=new URL(url);if(target.protocol!=="https:")throw new Error("HTTPS required");
       return "https://phantom.app/ul/browse/"+encodeURIComponent(target.href)+"?ref="+encodeURIComponent(target.origin);
     },
-    signProbe(address, signal) { return signDevnetProbe(standard, address, signal); },
+    async signProbe(address, signal) {
+      if(!standard||address!==connectedAddress)throw new Error("Lompakkoyhteys ei ole voimassa");
+      const before=generation;
+      await signDevnetProbe(standard,address,signal);
+      if(before!==generation||address!==connectedAddress)throw new Error("Lompakko vaihtui allekirjoituksen aikana");
+    },
     async snapshot(address, signal) {
       const result = await rpcCall("getBalance", [address, { commitment: "confirmed" }], signal);
       if (!Number.isSafeInteger(result?.value) || result.value < 0) {
