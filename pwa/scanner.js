@@ -7,7 +7,7 @@ import { copyGroup } from "./copy.js";
 import { candidateQuality, trojanDecision } from "./trojan-analysis.js";
 import { fullRugCheck } from "./trojan-security.js";
 import { analyzeEntryRoute } from "./trojan-entry.js";
-import { verifyPools, verifyPoolReserves } from "./trojan-pools.js";
+import { verifyPools, verifyPoolReserves, estimateBinSwap, estimateTickSwap } from "./trojan-pools.js";
 import { CandidateQueue, marketBatch, sourcesFor, watchPumpPortal } from "./trojan-discovery.js";
 
 export const scanLimit = 12;
@@ -355,13 +355,19 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
                 routeCache.set(positionKey(market), { ...pool, expires: Date.now() + 30000 });
               } else {
                 if (!solQuote || Date.now() - solQuote.at > 15000) solQuote = await currentMarket(signal);
-                const route = await analyzeEntryRoute(market.token, strategySettings(policy, next.profile === 'sniper' ? 6 : 5).orderUsd, {
+                const orderUsd = strategySettings(policy, next.profile === 'sniper' ? 6 : 5).orderUsd;
+                const depth = assessEntryDepth(pool,market,orderUsd,solQuote.price);
+                if(depth.status==="reject"||depth.status==="watch"){
+                  routeCache.set(positionKey(market),{...depth,expires:Date.now()+15000});
+                } else {
+                const route = await analyzeEntryRoute(market.token, orderUsd, {
                   signal, solUsd: solQuote.price, apiKey: jupiterKey, taker: simulationWallet || undefined,
                   slippageBps: 100
                 });
                 routeCache.set(positionKey(market), { status: route.allowed ? "approve" : "reject",
-                  reason: `${pool.protocol} · ${route.reason} (${route.score}/100)${route.simulation ? ` · simulaatio ${route.simulation}` : ""}`,
+                  reason: `${pool.protocol} · ${depth.reason} · ${route.reason} (${route.score}/100)${route.simulation ? ` · simulaatio ${route.simulation}` : ""}`,
                   expires: Date.now() + (route.allowed ? 8000 : 30000) });
+                }
               }
             } catch (error) {
               routeCache.set(positionKey(market), { status: "watch", reason: error.message, expires: Date.now() + 15000 });
@@ -558,4 +564,25 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   }
 
   await Promise.all([discover(), ...Array.from({length:workerLimit}, (_, id) => analyze(id)), enrich(), positions()]);
+}
+
+export function assessEntryDepth(pool,market,usd,solUsd){
+  if(!["Raydium CLMM","Orca Whirlpool","Meteora DLMM"].includes(pool.protocol))return {status:"pass",reason:"Poolitarkistus"};
+  const sol="So11111111111111111111111111111111111111112";
+  if(market.quoteToken!==sol)return {status:"pass",reason:"Syvyysarvio ei tue vastavaluuttaa; Jupiter tarkistaa reitin"};
+  if(!Number.isFinite(solUsd)||solUsd<=0||!Number.isFinite(usd)||usd<=0||!Number.isInteger(pool.feeBps))return {status:"watch",reason:"Syvyysarvion syöte puuttuu"};
+  // Pool mint order must be known, not inferred from market display order.
+  if(!pool.baseMint||!pool.quoteMint)return {status:"watch",reason:"Poolin minttijärjestys puuttuu"};
+  const xForY=pool.baseMint===sol;
+  if((xForY?pool.quoteMint:pool.baseMint)!==market.token)return {status:"watch",reason:"Poolin mintit eivät täsmää"};
+  const input=BigInt(Math.ceil(usd/solUsd*1e9));
+  const estimate=(pool.protocol==="Meteora DLMM"?estimateBinSwap:estimateTickSwap)(pool,input,xForY,pool.feeBps);
+  if(!estimate.complete)return {status:"watch",reason:"Varmennettu array-syvyys ei riitä"};
+  const decimals=xForY?pool.quote.decimals:pool.base.decimals;
+  const received=Number(estimate.outputRaw)/10**decimals;
+  const expected=Number(input)/1e9*(xForY?pool.spotRatio:1/pool.spotRatio);
+  if(!Number.isFinite(expected)||expected<=0||!Number.isFinite(received)||received<=0)return {status:"watch",reason:"Syvyysarvio virheellinen"};
+  const impact=100*(1-received/expected);
+  if(impact>5)return {status:"reject",reason:"Arvioitu kokonaiskustannus yli 5 %"};
+  return {status:"pass",reason:"Syvyysarvio "+Math.max(0,impact).toFixed(2)+" %"};
 }
