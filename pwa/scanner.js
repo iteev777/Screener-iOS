@@ -105,6 +105,7 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
       const book = { sol: 0, cost: 0, ...position, cash: portfolio.cash, realized: portfolio.realized,
         lossToday: portfolio.lossToday, lossDay: portfolio.lossDay, buyDay: portfolio.buyDay, buysToday: portfolio.buysToday, trades: [], count: 0 };
       const trojan = policy.strategy >= 5;
+      const selectedStrategy = position?.strategy ?? tick.tradeStrategy ?? policy.strategy;
       const orderUsd = trojan ? Math.round(Math.min(policy.orderUsd, book.cash * (policy.balanceFraction ?? 10) / 100) * 100) / 100 : policy.orderUsd;
       const executionPolicy = trojan ? { ...policy, orderUsd, lossUsd: policy.lossUsd } : policy;
       const order = orderFor(engine, decide(tick, book), book, tick, executionPolicy);
@@ -114,9 +115,9 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
       const duplicate = Object.entries(portfolio.positions).some(([other, item]) =>
         other !== key && item.market.token === tick.token);
       const positions = Object.values(portfolio.positions);
-      const profileCount = trojan ? positions.filter(item => item.strategy === policy.strategy).length : 0;
+      const profileCount = trojan ? positions.filter(item => item.strategy === selectedStrategy).length : 0;
       const profileAllowed = !trojan || (orderUsd >= 1 &&
-        Boolean(position || (positions.length < (policy.maxTotalPositions ?? 15) && profileCount < (policy.strategy === 6 ? policy.maxSniperPositions ?? 10 : policy.maxMainPositions ?? 10))));
+        Boolean(position || (positions.length < (policy.maxTotalPositions ?? 15) && profileCount < (selectedStrategy === 6 ? policy.maxSniperPositions ?? 10 : policy.maxMainPositions ?? 10))));
       const buyAllowed = profileAllowed && eligible(tick.token) && Number.isFinite(tick.volume) && tick.volume >= (policy.scanMinVolume ?? 10000) && !duplicate &&
         (position || Object.keys(portfolio.positions).length < (policy.maxPools ?? scanLimit)) &&
         exposure + orderUsd <= policy.exposureUsd;
@@ -133,7 +134,7 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
       }
       if (book.sol > 0) {
         const { sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool, lastTradeAt } = book;
-        portfolio.positions[key] = { strategy: position?.strategy ?? policy.strategy, sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool,
+        portfolio.positions[key] = { strategy: selectedStrategy, sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool,
           lastTradeAt, peak: Math.max(book.peak ?? tick.price, tick.price), mark: tick.price,
           lastTickAt: tick.at, market: { token: tick.token, pool: tick.pool, symbol: tick.symbol } };
       } else if (position) {
@@ -280,12 +281,15 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         const ranked = batch.map(item => {
           const pair = markets.get(item.token);
           const quality = pair && candidateQuality(pair.raw, item.sources, now);
-          const profile = policy.strategy === 6 ? "sniper" : "main";
-          const strategy = policy.strategy >= 5 && pair
-            ? trojanDecision(pair.raw, item.sources, profile, now) : null;
+          let profile = policy.strategy === 6 ? "sniper" : "main";
+          let strategy = policy.strategy >= 5 && pair ? trojanDecision(pair.raw, item.sources, profile, now) : null;
+          if (policy.strategy === 7 && pair && item.sources.has("PumpPortal")) {
+            const sniper = trojanDecision(pair.raw, item.sources, "sniper", now);
+            if (sniper.decision === "approve" || (strategy.decision !== "approve" && sniper.score > strategy.score)) { profile = "sniper"; strategy = sniper; }
+          }
           const decision = !pair || (profile === "sniper" && !item.sources.has("PumpPortal")) ? "watch"
             : quality.tier === "reject" ? "reject" : strategy?.decision ?? "approve";
-          return { item, pair, quality, decision, strategy };
+          return { item, pair, quality, decision, strategy, profile };
         }).sort((a, b) => (b.quality?.score ?? 0) - (a.quality?.score ?? 0));
         for (const cache of [mintCache, rugCache, routeCache]) {
           for (const [token, value] of cache) if (value.expires <= now) cache.delete(token);
@@ -349,7 +353,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         }
         if (signal.aborted) return;
         const candidates = [];
-        for (const { item, pair, decision, quality, strategy } of ranked) {
+        for (const { item, pair, decision, quality, strategy, profile } of ranked) {
           const authority = mintCache.get(item.token)?.ok;
           const report = rugCache.get(item.token);
           const rug = rugCeiling > 0 ? report?.ok : true;
@@ -372,7 +376,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           queue.finish(item, checked, pair?.raw, now);
           if (checked === "approve") {
             if (route) item.due = Math.min(item.due, route.expires);
-            candidates.push({ ...pair.market, at: now, priority: item.priority, routeExpires: route?.expires });
+            candidates.push({ ...pair.market, tradeStrategy: profile === "sniper" ? 6 : 5, at: now, priority: item.priority, routeExpires: route?.expires });
           }
         }
         approvedTicks = [...candidates, ...approvedTicks.filter(tick => !batch.some(item => item.token === tick.token))]
@@ -495,6 +499,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         const copy = Date.now() - copyAt <= 20000 ? copySignals : new Map();
         const updated = await commit(fresh.map(tick => ({
           ...tick, observedAt: tick.at, at,
+          tradeStrategy: candidateByPool.get(positionKey(tick))?.tradeStrategy,
           routeExpires: candidateByPool.get(positionKey(tick))?.routeExpires,
           exitsOnly: heldKeys.has(positionKey(tick)) && !candidateByPool.has(positionKey(tick))
         })), (tick, book) => {
