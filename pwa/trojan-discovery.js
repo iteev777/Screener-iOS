@@ -77,7 +77,7 @@ export async function marketBatch(tokens, signal) {
   if (!tokens.length || tokens.length > 30 || tokens.some(token => typeof token !== "string" || !address.test(token))) {
     throw new Error("Virheellinen minttien erähaku");
   }
-  let cache=marketCaches.get(signal);if(!cache){cache=new Map();marketCaches.set(signal,cache);}
+  let cache=signal ? marketCaches.get(signal) : undefined;if(!cache){cache=new Map();if(signal)marketCaches.set(signal,cache);}
   const now=Date.now(),best=new Map();
   for(const [key,value] of cache)if(value.expires<=now)cache.delete(key);
   const missing=[...new Set(tokens)].filter(token=>{const hit=cache.get(token);if(hit){if(hit.value)best.set(token,hit.value);return false;}return true;});
