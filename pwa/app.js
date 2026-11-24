@@ -313,6 +313,14 @@ async function startScan() {
       },
       commit: (ticks, decide, eligible) => commitScan(ticks, decide, eligible, policy, controller.signal),
       telemetry(stats) {
+      const total = stats.analyzed || 0;
+      byId("filter-summary").textContent = `Analysoidut ${total} · Hyväksytyt ${stats.approved} · Hylätyt ${stats.rejected} · Odottavat ${stats.waiting}`;
+      byId("monitor-summary").textContent = `PumpPortal ${stats.pump} · Työntekijät ${stats.activeWorkers ?? 0} · Keskimääräinen analyysierä ${stats.averageAnalysisMs ?? 0} ms`;
+      byId("monitor-sources").replaceChildren(...(stats.sources ?? []).map(source => {
+        const p = document.createElement("p");
+        p.textContent = `${source.name}: ${source.error || (source.busy ? "Haetaan" : "Viimeisin haku: "+source.count)}`;
+        return p;
+      }));
         const now = Date.now();
         if (!samples.length || now - samples.at(-1).at >= 1000) samples.push({at:now,found:stats.found,analyzed:stats.analyzed});
         while (samples.length > 1 && samples[1].at <= now - 60000) samples.shift();
