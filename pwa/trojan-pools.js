@@ -106,7 +106,7 @@ export async function verifyPoolReserves(market, signal) {
   if (decoded.status === "decoded" && ["Moonit","Meteora DBC"].includes(decoded.protocol)) return verifySpecialPool(market, account, decoded, signal);
   if (decoded.status !== "decoded" || !decoded.baseVault || !decoded.quoteVault || !decoded.base || !decoded.quote) return { status:"watch", reason:"Reservirakenne ei ole tuettu" };
   const keys = [decoded.baseVault, decoded.quoteVault, decoded.base, decoded.quote].map(encodeKey);
-  const feeKeys = decoded.protocol === "PumpSwap" ? ["ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw","5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"] : decoded.protocol === "Raydium CPMM" ? [encodeKey(accountBytes(account).slice(8,40))] : [];
+  const feeKeys = decoded.protocol === "PumpSwap" ? ["ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw","5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"] : decoded.protocol === "Raydium CPMM" ? [encodeKey(accountBytes(account).slice(8,40))] : decoded.protocol === "Raydium CLMM" ? [encodeKey(accountBytes(account).slice(9,41))] : [];
   const range = concentratedRange(decoded.protocol,accountBytes(account));
   const arrayKeys = range ? await rangeAddresses(decoded.protocol,market.pool,account.owner,range) : [];
   const snapshot = await rpcCall("getMultipleAccounts", [[market.pool, ...keys, ...feeKeys, ...arrayKeys], options], signal);
@@ -119,6 +119,17 @@ export async function verifyPoolReserves(market, signal) {
   const requested = publicKeyBytes(market.token), other = publicKeyBytes(market.quoteToken);
   if (!((equal(fresh.base,requested) && equal(fresh.quote,other)) || (equal(fresh.quote,requested) && equal(fresh.base,other)))) throw new Error("Poolin markkinapari vaihtui");
   const pricing = poolPricing(fresh.protocol, accountBytes(p), base, quote);
+  if (fresh.protocol === "Orca Whirlpool") {
+    const raw=accountBytes(p);
+    pricing.feeBps=decodeConcentratedFee(fresh.protocol,raw);
+  }
+  if (fresh.protocol === "Raydium CLMM") {
+    if(globalConfig?.owner!==p.owner||!equal(accountBytes(p).slice(9,41),accountBytes(account).slice(9,41)))throw new Error("CLMM config changed");
+    const cfg=accountBytes(globalConfig);
+    const disc=new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode("account:AmmConfig"))).slice(0,8);
+    if(!equal(cfg.subarray(0,8),disc))throw new Error("CLMM config discriminator invalid");
+    pricing.feeBps=decodeConcentratedFee(fresh.protocol,cfg);
+  }
   if (fresh.protocol === "Raydium CPMM") {
     if (globalConfig?.owner !== p.owner || !equal(accountBytes(p).slice(8,40),accountBytes(account).slice(8,40))) throw new Error("CPMM konfiguraatio vaihtui");
     pricing.feeBps = await decodeCpmmFees(accountBytes(globalConfig));
@@ -434,4 +445,18 @@ export function estimateTickSwap(snapshot,inputRaw,swapXForY,feeBps){
     L+=BigInt(level.liquidityNet)*(swapXForY?-1n:1n);crossed++;
   }
   return {complete:remaining===0n&&out>0n,inputRaw:input.toString(),outputRaw:out.toString(),unfilledRaw:remaining.toString(),feeRaw:fees.toString(),ticksCrossed:crossed,indicative:true};
+}
+
+export function decodeConcentratedFee(protocol,raw){
+  const v=new DataView(raw.buffer,raw.byteOffset,raw.byteLength);
+  let rate;
+  if(protocol==="Orca Whirlpool"){
+    if(raw.length<245)throw new Error("Whirlpool fee layout truncated");
+    rate=v.getUint16(45,true);
+  }else if(protocol==="Raydium CLMM"){
+    if(raw.length<47)throw new Error("CLMM fee layout truncated");
+    rate=v.getUint32(43,true);
+  }else throw new Error("Unsupported fee layout");
+  if(rate>=1000000)throw new Error("Invalid trade fee");
+  return Math.ceil(rate/100);
 }
