@@ -96,8 +96,8 @@ export function orderFor(engine, signal, book, tick, settings) {
 
 export function applyPaperFill(book, order, tick, settings) {
   const { price, at } = tick;
-  const slip = settings.slippageBps / 10000;
-  const fee = settings.feeBps / 10000;
+  const model = paperExecutionCost(book,order,tick,settings);
+  const {slip,fee}=model;
   const buy = order.side === "Osto";
   let realizedPnl = null;
   const fill = price * (1 + (buy ? slip : -slip));
@@ -139,6 +139,20 @@ export function applyPaperFill(book, order, tick, settings) {
   book.lastTradeAt = at;
   book.count = (book.count ?? 0) + 1;
   book.trades.unshift({ side: order.side, price: fill, reason: order.reason, at,
-    realizedPnl, quantity: buy ? order.usd * (1 - fee) / fill : order.sol });
+    realizedPnl, estimatedImpactPct: model.impact*100, executionModel: model.source, quantity: buy ? order.usd * (1 - fee) / fill : Math.min(order.sol, book.sol+order.sol) });
   book.trades = book.trades.slice(0, 200);
+}
+
+export function paperExecutionCost(book,order,tick,settings){
+  const buy=order.side==="Osto";
+  const notional=buy?order.usd:Math.min(order.sol,book.sol)*tick.price;
+  const baseline=settings.slippageBps/10000;
+  const fee=settings.feeBps/10000;
+  if(!settings.trojanExit)return {slip:baseline,fee,impact:0,source:"fixed"};
+  // Indicative constant-product proxy, not a guaranteed executable quote.
+  const reserve=Number(tick.liquidity)/2;
+  const impact=Number.isFinite(reserve)&&reserve>0?notional/(reserve+notional):0.5;
+  const route=buy&&Number.isFinite(tick.entryImpactPct)?Math.max(0,tick.entryImpactPct/100):0;
+  const slip=Math.min(.99,Math.max(baseline,impact,route));
+  return {slip,fee,impact,source:"liquidity_proxy"};
 }
