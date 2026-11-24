@@ -237,6 +237,10 @@ byId("emergency").onclick = async () => {
 function renderScan(portfolio, ticks = []) {
   const positions = Object.values(portfolio.positions);
   const equity = portfolio.cash + positions.reduce((sum, p) => sum + p.sol * p.mark, 0);
+  byId("home-equity").textContent = usd.format(equity);
+  byId("home-cash").textContent = usd.format(portfolio.cash);
+  byId("home-pnl").textContent = usd.format(portfolio.realized);
+  byId("home-count").textContent = String(positions.length);
   byId("scan-balance").textContent = `${usd.format(portfolio.cash)} käteistä · salkku ${usd.format(equity)} · toteutunut P/L ${usd.format(portfolio.realized)}`;
   const rows = (id, values) => byId(id).replaceChildren(...values.map(value => {
     const item = document.createElement("li");
@@ -301,12 +305,18 @@ async function startScan() {
   try {
     const load = async () => await stored(scanKey) ?? newPortfolio();
     const samples = [];
+    const rejectionReasons = new Map();
+    byId("filter-reasons").replaceChildren();
     await runScanner({ engine, policy, rules: policy.strategy === 3 ? rules : null, timeframe,
       copyWallets: policy.strategy === 4 ? copyWallets : null, birdeyeKey, jupiterKey, simulationWallet, signal: controller.signal, load,
       event(entry) {
         const row = document.createElement("li");
         const label = { found: "Löytyi", approve: "Hyväksytty", watch: "Odottaa", reject: "Hylätty" }[entry.status];
         row.textContent = `${new Date(entry.at).toLocaleTimeString("fi-FI")} · ${label} · ${entry.mint}${entry.score == null ? "" : ` · strategia ${entry.score}/100`}${entry.quality == null ? "" : ` · laatu ${entry.quality}/100`} · ${entry.reason}`;
+        if (entry.status === "reject") {
+          rejectionReasons.set(entry.reason, (rejectionReasons.get(entry.reason) ?? 0) + 1);
+          byId("filter-reasons").replaceChildren(...[...rejectionReasons].sort((a,b)=>b[1]-a[1]).slice(0,10).map(([reason,count])=>{ const p=document.createElement("p"); p.textContent=`${count} · ${reason}`; return p; }));
+        }
         const list = byId("scan-events");
         list.prepend(row);
         if (list.children.length > 60) list.lastElementChild.remove();
