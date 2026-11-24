@@ -72,14 +72,19 @@ export function sourcesFor(birdeyeKey) {
   return sources;
 }
 
+const marketCaches=new WeakMap();
 export async function marketBatch(tokens, signal) {
   if (!tokens.length || tokens.length > 30 || tokens.some(token => typeof token !== "string" || !address.test(token))) {
     throw new Error("Virheellinen minttien erähaku");
   }
-  const requested = new Set(tokens);
-  const rows = await fetchJson(`${dex}/tokens/v1/solana/${tokens.join(",")}`, {}, signal);
+  let cache=marketCaches.get(signal);if(!cache){cache=new Map();marketCaches.set(signal,cache);}
+  const now=Date.now(),best=new Map();
+  for(const [key,value] of cache)if(value.expires<=now)cache.delete(key);
+  const missing=[...new Set(tokens)].filter(token=>{const hit=cache.get(token);if(hit){if(hit.value)best.set(token,hit.value);return false;}return true;});
+  if(!missing.length)return best;
+  const requested = new Set(missing);
+  const rows = await fetchJson(`${dex}/tokens/v1/solana/${missing.join(",")}`, {}, signal);
   if (!Array.isArray(rows)) throw new Error("Virheellinen tokenien hintaerä");
-  const best = new Map();
   for (const raw of rows) {
     const market = normalizePair(raw);
     if (!market || !requested.has(market.token)) continue;
@@ -87,6 +92,8 @@ export async function marketBatch(tokens, signal) {
       best.set(market.token, { market, raw });
     }
   }
+  for(const token of missing)cache.set(token,{value:best.get(token),expires:now+(best.has(token)?5000:3000)});
+  while(cache.size>3000)cache.delete(cache.keys().next().value);
   return best;
 }
 
@@ -176,10 +183,9 @@ export class CandidateQueue {
       const sniper = entry.sources.size === 1 && entry.sources.has("PumpPortal");
       if (!entry.inFlight && now - (sniper ? entry.seen : entry.lastSeen) >= (sniper ? 300000 : 600000)) map.delete(mint);
     }
+    const rank=item=>(item.priority??0)+(item.sources.has("PumpPortal")?20:0)+(item.attempts===0?15:0)+Math.min(120,Math.max(0,now-item.due)/1000)+Math.min(10,item.sources.size*2);
     return this.entries().filter(item => item.due <= now && !item.inFlight)
-      .sort((a, b) => Number(b.attempts === 0) - Number(a.attempts === 0) ||
-        Number(b.sources.has("PumpPortal")) - Number(a.sources.has("PumpPortal")) ||
-        b.sources.size - a.sources.size || (b.priority ?? 0) - (a.priority ?? 0) || a.due - b.due).slice(0, 30).map(item => { item.inFlight = true; return item; });
+      .sort((a,b)=>rank(b)-rank(a)||a.due-b.due).slice(0, 30).map(item => { item.inFlight = true; return item; });
   }
 
   finish(item, result, raw, now) {
@@ -187,10 +193,11 @@ export class CandidateQueue {
     if (!item.attempts) this.stats.analyzed++;
     if (result === "approve" && !item.approved) { this.stats.approved++; item.approved = true; }
     if (result === "reject" && !item.rejected) { this.stats.rejected++; item.rejected = true; }
+    item.streak=item.decision===result?(item.streak??0)+1:1;
     item.decision = result;
     item.attempts++;
     item.priority = raw ? candidateQuality(raw, item.sources, now).score : 0;
-    item.due = now + (result === "watch" ? 10000 : result === "approve" ? 15000 : 60000);
+    item.due = now + (result === "watch" ? Math.min(30000,10000+Math.max(0,item.streak-2)*3000) : result === "approve" ? 15000 : Math.min(180000,60000*item.streak));
   }
 
   release(batch, now) {
