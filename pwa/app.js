@@ -306,10 +306,17 @@ async function startScan() {
     const load = async () => await stored(scanKey) ?? newPortfolio();
     const samples = [];
     const rejectionReasons = new Map();
+    const tokenResults = new Map();
+    const filter = byId("token-status-filter"), query = byId("token-filter-query"), results = byId("token-filter-results");
+    function renderTokens(){const q=query.value.trim();const rows=[...tokenResults.values()].reverse().filter(e=>(filter.value==="all"||e.status===filter.value)&&(!q||e.mint.includes(q))).slice(0,100);results.replaceChildren(...rows.map(e=>{const li=document.createElement("li");li.textContent=`${e.mint} · ${e.status} · ${e.score??"—"}/100 · ${e.reason}`;return li;}));}
+    filter.onchange=renderTokens;query.oninput=renderTokens;renderTokens();
     byId("filter-reasons").replaceChildren();
     await runScanner({ engine, policy, rules: policy.strategy === 3 ? rules : null, timeframe,
       copyWallets: policy.strategy === 4 ? copyWallets : null, birdeyeKey, jupiterKey, simulationWallet, signal: controller.signal, load,
       event(entry) {
+        tokenResults.delete(entry.mint);tokenResults.set(entry.mint,entry);
+        if(tokenResults.size>2000)tokenResults.delete(tokenResults.keys().next().value);
+        renderTokens();
         const row = document.createElement("li");
         const label = { found: "Löytyi", approve: "Hyväksytty", watch: "Odottaa", reject: "Hylätty" }[entry.status];
         row.textContent = `${new Date(entry.at).toLocaleTimeString("fi-FI")} · ${label} · ${entry.mint}${entry.score == null ? "" : ` · strategia ${entry.score}/100`}${entry.quality == null ? "" : ` · laatu ${entry.quality}/100`} · ${entry.reason}`;
