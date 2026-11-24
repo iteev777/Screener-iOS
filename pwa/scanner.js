@@ -86,7 +86,7 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
   const unique = new Map(ticks.map(tick => [positionKey(tick), tick]));
   const input = [...unique.entries()].filter(([, tick]) =>
     Number.isFinite(tick.price) && tick.price > 0 && Number.isFinite(tick.at) &&
-    tick.at > (portfolio.lastScanAt ?? 0) &&
+    tick.at >= (portfolio.lastScanAt ?? 0) &&
     (tick.observedAt === undefined || (Date.now() >= tick.observedAt && Date.now() - tick.observedAt <= maxTickAge)) &&
     (!tick.exitsOnly || portfolio.positions[positionKey(tick)]));
   if (input.length) portfolio.lastScanAt = Math.max(...input.map(([, tick]) => tick.at));
@@ -121,7 +121,7 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
         Boolean(position || (positions.length < (policy.maxTotalPositions ?? 15) && profileCount < (selectedStrategy === 6 ? policy.maxSniperPositions ?? 10 : policy.maxMainPositions ?? 10))));
       const buyAllowed = profileAllowed && eligible(tick.token) && Number.isFinite(tick.volume) && tick.volume >= (trojan ? policy[(selectedStrategy===6?"sniper":"main")+"MinVolume24"]??10000 : policy.scanMinVolume ?? 10000) && !duplicate &&
         (position || Object.keys(portfolio.positions).length < (policy.maxPools ?? scanLimit)) &&
-        exposure + orderUsd <= policy.exposureUsd;
+        exposure + (order?.usd ?? orderUsd) <= policy.exposureUsd;
       if (order && (exits || (!tick.exitsOnly && buyAllowed &&
           (tick.routeExpires === undefined || Date.now() <= tick.routeExpires)))) {
         applyPaperFill(book, order, tick, executionPolicy);
@@ -137,7 +137,7 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
         const { sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool, lastTradeAt } = book;
         portfolio.positions[key] = { strategy: selectedStrategy, sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool,
           lastTradeAt, peak: Math.max(book.peak ?? tick.price, tick.price), mark: tick.price,
-          lastTickAt: tick.at, market: { token: tick.token, pool: tick.pool, symbol: tick.symbol } };
+          lastTickAt: tick.at, market: { token: tick.token, pool: tick.pool, symbol: tick.symbol, quoteToken: tick.quoteToken ?? position?.market?.quoteToken } };
       } else if (position) {
         delete portfolio.positions[key];
       }
@@ -379,6 +379,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
                   slippageBps: 100
                 });
                 routeCache.set(positionKey(market), { status: route.allowed ? "approve" : "reject",
+                  entryImpactPct: route.impact,
                   reason: `${pool.protocol} · ${depth.reason} · ${route.reason} (${route.score}/100)${route.simulation ? ` · simulaatio ${route.simulation}` : ""}`,
                   expires: Date.now() + (route.allowed ? 8000 : 30000) });
                 }
@@ -416,7 +417,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           queue.finish(item, checked, pair?.raw, now);
           if (checked === "approve") {
             if (route) item.due = Math.min(item.due, route.expires);
-            candidates.push({ ...pair.market, tradeStrategy: policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: now, priority: item.priority, routeExpires: route?.expires });
+            candidates.push({ ...pair.market, tradeStrategy: policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: now, priority: item.priority, routeExpires: route?.expires, entryImpactPct: route?.entryImpactPct });
           }
         }
         approvedTicks = [...candidates, ...approvedTicks.filter(tick => !batch.some(item => item.token === tick.token))]
@@ -505,7 +506,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         }
         const ticks = [...(policy.strategy>=5&&!rules&&!copyWallets?.length?[]:prices), ...candidates.filter(tick => tracked.has(positionKey(tick)) &&
           !heldKeys.has(positionKey(tick)) && usedPrices.get(positionKey(tick)) !== tick.at)];
-        const at = Date.now();
+        const at = Math.max(Date.now(), (portfolio.lastScanAt??0)+1);
         const fresh = ticks.filter(tick => at >= tick.at && at - tick.at <= maxTickAge);
         for (const tick of fresh) {
           const key = positionKey(tick);
@@ -550,6 +551,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           ...tick, observedAt: tick.at, at,
           tradeStrategy: candidateByPool.get(positionKey(tick))?.tradeStrategy,
           routeExpires: candidateByPool.get(positionKey(tick))?.routeExpires,
+          entryImpactPct: candidateByPool.get(positionKey(tick))?.entryImpactPct,
           exitsOnly: heldKeys.has(positionKey(tick)) && !candidateByPool.has(positionKey(tick))
         })), (tick, book) => {
           const key = positionKey(tick);
