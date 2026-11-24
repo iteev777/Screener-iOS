@@ -7,7 +7,7 @@ import { copyGroup } from "./copy.js";
 import { candidateQuality, trojanDecision } from "./trojan-analysis.js";
 import { fullRugCheck } from "./trojan-security.js";
 import { analyzeEntryRoute } from "./trojan-entry.js";
-import { verifyPools } from "./trojan-pools.js";
+import { verifyPools, verifyPoolReserves } from "./trojan-pools.js";
 import { CandidateQueue, marketBatch, sourcesFor, watchPumpPortal } from "./trojan-discovery.js";
 
 export const scanLimit = 12;
@@ -346,7 +346,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
             const market = next.pair.market;
             routeBusy = true;
             try {
-              const [pool] = await verifyPools([market], signal);
+              let [pool] = await verifyPools([market], signal);
+              if (pool.status === "approve") {
+                const reserves = await verifyPoolReserves(market, signal);
+                pool = { ...pool, ...reserves };
+              }
               if (pool.status !== "approve") {
                 routeCache.set(positionKey(market), { ...pool, expires: Date.now() + 30000 });
               } else {
