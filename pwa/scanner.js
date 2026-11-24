@@ -119,7 +119,7 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
       const profileCount = trojan ? positions.filter(item => item.strategy === selectedStrategy).length : 0;
       const profileAllowed = !trojan || (orderUsd >= 1 &&
         Boolean(position || (positions.length < (policy.maxTotalPositions ?? 15) && profileCount < (selectedStrategy === 6 ? policy.maxSniperPositions ?? 10 : policy.maxMainPositions ?? 10))));
-      const buyAllowed = profileAllowed && eligible(tick.token) && Number.isFinite(tick.volume) && tick.volume >= (policy.scanMinVolume ?? 10000) && !duplicate &&
+      const buyAllowed = profileAllowed && eligible(tick.token) && Number.isFinite(tick.volume) && tick.volume >= (trojan ? policy[(selectedStrategy===6?"sniper":"main")+"MinVolume24"]??10000 : policy.scanMinVolume ?? 10000) && !duplicate &&
         (position || Object.keys(portfolio.positions).length < (policy.maxPools ?? scanLimit)) &&
         exposure + orderUsd <= policy.exposureUsd;
       if (order && (exits || (!tick.exitsOnly && buyAllowed &&
@@ -298,9 +298,9 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           const pair = markets.get(item.token);
           const quality = pair && candidateQuality(pair.raw, item.sources, now);
           let profile = policy.strategy === 6 ? "sniper" : "main";
-          let strategy = policy.strategy >= 5 && pair ? trojanDecision(pair.raw, item.sources, profile, now) : null;
+          let strategy = policy.strategy >= 5 && pair ? trojanDecision(pair.raw, item.sources, profile, now, policy) : null;
           if (policy.strategy === 7 && pair && item.sources.has("PumpPortal")) {
-            const sniper = trojanDecision(pair.raw, item.sources, "sniper", now);
+            const sniper = trojanDecision(pair.raw, item.sources, "sniper", now, policy);
             if (sniper.decision === "approve" || (strategy.decision !== "approve" && sniper.score > strategy.score)) { profile = "sniper"; strategy = sniper; }
           }
           const decision = !pair || (profile === "sniper" && !item.sources.has("PumpPortal")) ? "watch"
@@ -356,7 +356,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
               } else {
                 if (!solQuote || Date.now() - solQuote.at > 15000) solQuote = await currentMarket(signal);
                 const orderUsd = strategySettings(policy, next.profile === 'sniper' ? 6 : 5).orderUsd;
-                const depth = assessEntryDepth(pool,market,orderUsd,solQuote.price);
+                const depth = assessEntryDepth(pool,market,orderUsd,solQuote.price,policy[next.profile+"MaxImpact"]??5);
                 if(depth.status==="reject"||depth.status==="watch"){
                   routeCache.set(positionKey(market),{...depth,expires:Date.now()+15000});
                 } else {
@@ -566,7 +566,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   await Promise.all([discover(), ...Array.from({length:workerLimit}, (_, id) => analyze(id)), enrich(), positions()]);
 }
 
-export function assessEntryDepth(pool,market,usd,solUsd){
+export function assessEntryDepth(pool,market,usd,solUsd,maxImpact=5){
   if(!["Raydium CLMM","Orca Whirlpool","Meteora DLMM"].includes(pool.protocol))return {status:"pass",reason:"Poolitarkistus"};
   const sol="So11111111111111111111111111111111111111112";
   if(market.quoteToken!==sol)return {status:"pass",reason:"Syvyysarvio ei tue vastavaluuttaa; Jupiter tarkistaa reitin"};
@@ -583,6 +583,6 @@ export function assessEntryDepth(pool,market,usd,solUsd){
   const expected=Number(input)/1e9*(xForY?pool.spotRatio:1/pool.spotRatio);
   if(!Number.isFinite(expected)||expected<=0||!Number.isFinite(received)||received<=0)return {status:"watch",reason:"Syvyysarvio virheellinen"};
   const impact=100*(1-received/expected);
-  if(impact>5)return {status:"reject",reason:"Arvioitu kokonaiskustannus yli 5 %"};
+  if(impact>maxImpact)return {status:"reject",reason:"Arvioitu kokonaiskustannus yli "+maxImpact+" %"};
   return {status:"pass",reason:"Syvyysarvio "+Math.max(0,impact).toFixed(2)+" %"};
 }
