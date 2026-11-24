@@ -146,13 +146,24 @@ test("a row that arrives fades in and the rows below slide, keeping their nodes"
 test("a row that leaves fades in place, then the rows below close its gap", async (t) => {
   const { page, book } = await openBook(t);
 
+  await page.evaluate(() => {
+    window.__leavingSnapshot = null;
+    const animate = Element.prototype.animate;
+    Element.prototype.animate = function (...args) {
+      if (this.matches('#positions-root tr[data-dt-leaving-id="101"]')) {
+        window.__leavingSnapshot = {
+          ids: [...this.parentElement.children].map(tr => tr.getAttribute("data-row-id") ?? "leaving:" + tr.getAttribute("data-dt-leaving-id")),
+          hidden: this.getAttribute("aria-hidden")
+        };
+      }
+      return animate.apply(this, args);
+    };
+  });
   book.open = book.open.filter((row) => row.id !== 101);
-  await page.locator('#positions-root tr[data-dt-leaving-id="101"]').waitFor({ state: "attached" });
-  assert.deepEqual(await rowIds(page), ["100", "leaving:101", "102"], "it fades where it stood");
-  assert.equal(
-    await page.getAttribute('#positions-root tr[data-dt-leaving-id="101"]', "aria-hidden"),
-    "true"
-  );
+  await page.waitForFunction(() => window.__leavingSnapshot !== null);
+  const snapshot = await page.evaluate(() => window.__leavingSnapshot);
+  assert.deepEqual(snapshot.ids, ["100", "leaving:101", "102"], "it fades where it stood");
+  assert.equal(snapshot.hidden, "true");
 
   await page.waitForFunction(() => !document.querySelector("#positions-root tr.dt-row-leaving"));
   assert.deepEqual(await rowIds(page), ["100", "102"]);
