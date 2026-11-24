@@ -129,7 +129,7 @@
 <details data-page="settings"><summary>Oma ehtopuu</summary>
 <form id="rules"><fieldset id="rule-fields" disabled>
 <label>OHLCV-aikaväli<select id="timeframe"><option>1m</option><option selected>5m</option><option>15m</option><option>1h</option><option>4h</option><option>1d</option></select></label>
-<label>Entry- ja exit-ehdot (JSON)<textarea id="rule-json" required rows="8">{
+<div id="visual-rules"></div><button type="button" id="visual-load" class="secondary">Lataa nykyiset ehdot editoriin</button><p id="visual-status" role="status"></p><label>Entry- ja exit-ehdot (JSON)<textarea id="rule-json" required rows="8">{
   "entry": {"metric":"rsi","period":14,"compare":"lt","value":30},
   "exit": {"metric":"rsi","period":14,"compare":"gt","value":70}
 }</textarea></label>
@@ -156,4 +156,5 @@
 </main>
 <script type="module" src="./app.js"></script>
 <script type="module" src="./dashboard-nav.js"></script>
+<script type="module" src="./visual-rules.js"></script>
 </body></html>
