@@ -211,13 +211,18 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   let sourceError = "";
   let processing = 0;
   let routeBusy = false;
+  let activeWorkers = 0;
+  let rugActive = 0;
+  let rugCooldown = 0;
+  let analysisMs = 0;
+  let analysisBatches = 0;
   let candleIndex = 0;
   const candles = new Map();
   let approvedTicks = [];
   let copySignals = new Map();
   let copyAt = 0;
   const usedPrices = new Map();
-  const show = () => { if (!signal.aborted) telemetry?.({ ...queue.snapshot(Date.now()), processing, pump, sourceError, sources: sources.map(s => ({name:s.name,count:s.count ?? 0,busy:!!s.busy,error:s.error ?? ""})) }); };
+  const show = () => { if (!signal.aborted) telemetry?.({ ...queue.snapshot(Date.now()), processing, activeWorkers, averageAnalysisMs: analysisBatches ? Math.round(analysisMs / analysisBatches) : 0, pump, sourceError, sources: sources.map(s => ({name:s.name,count:s.count ?? 0,busy:!!s.busy,error:s.error ?? ""})) }); };
   watchPumpPortal(signal, mint => add([mint], "PumpPortal"), status => {
     pump = status;
     show();
@@ -266,6 +271,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         continue;
       }
       processing += batch.length;
+      activeWorkers++;
       show();
       try {
         const markets = await marketBatch(batch.map(item => item.token), signal);
@@ -294,8 +300,9 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           sourceError = `Minttitarkistus: ${error.message}`;
         }
         const rugCeiling = policy.rugScore || (policy.strategy >= 5 ? 30 : 0);
-        if (rugCeiling > 0 && !signal.aborted) {
-          const needRug = possible.filter(({ item }) => mintCache.get(item.token)?.ok && !rugCache.has(item.token)).slice(0, 2);
+        if (rugCeiling > 0 && !signal.aborted && Date.now() >= rugCooldown) {
+          const needRug = possible.filter(({ item }) => mintCache.get(item.token)?.ok && !rugCache.has(item.token)).slice(0, Math.max(0, Math.min(2, 4 - rugActive)));
+          rugActive += needRug.length;
           await Promise.all(needRug.map(async ({ item }) => {
             try {
               const suffix = policy.strategy >= 5 ? "report" : "report/summary";
@@ -307,7 +314,8 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
             } catch (error) {
               rugCache.set(item.token, { ok: null, expires: now + 30000 });
               sourceError = `RugCheck: ${error.message}`;
-            }
+              if (error.status === 429) rugCooldown = Date.now() + 60000;
+            } finally { rugActive--; }
           }));
         }
         if (signal.aborted) return;
@@ -377,6 +385,9 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
       } finally {
         queue.release(batch, Date.now());
         processing -= batch.length;
+        activeWorkers--;
+        analysisMs += Date.now() - started;
+        analysisBatches++;
         show();
       }
       await pause(failures ? Math.min(60000, 3000 * 2 ** Math.min(failures, 5)) : 500, signal);
@@ -517,5 +528,5 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
     }
   }
 
-  await Promise.all([discover(), analyze(), analyze(), enrich(), positions()]);
+  await Promise.all([discover(), ...Array.from({length:4}, () => analyze()), enrich(), positions()]);
 }
