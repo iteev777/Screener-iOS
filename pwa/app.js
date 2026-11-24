@@ -187,6 +187,7 @@ function setButtons() {
   byId("connect").disabled = busy || Boolean(signing);
   byId("sign-probe").hidden = !isLive || !wallet || !live.canSign?.();
   byId("sign-probe").disabled = busy || Boolean(signing);
+  byId("live").hidden = !isLive && settings.strategy >= 5;
   byId("live").textContent = isLive ? "Käynnistä Live" : "Käynnistä valitulla poolilla";
   byId("live").disabled = blocked || busy || (isLive && (!wallet || !live.ready));
   byId("stop").disabled = !run;
@@ -267,6 +268,8 @@ function commitScan(ticks, decide, eligible, policy, signal) {
 async function startScan() {
   if (emergency || changingInterlock || run || signing || mode() !== "paper" || document.visibilityState !== "visible") return;
   const policy = settings;
+  const birdeyeKey = byId("birdeye-key").value.trim();
+  byId("birdeye-key").value = "";
   if ((policy.strategy === 4 && !copyWallets.length) || (policy.strategy === 3 && !rules)) {
     byId("scan-status").textContent = "Tallenna ehtopuu tai Copy Trading -lompakko valitulle strategialle.";
     return;
@@ -281,8 +284,12 @@ async function startScan() {
   try {
     const load = async () => await stored(scanKey) ?? newPortfolio();
     await runScanner({ engine, policy, rules: policy.strategy === 3 ? rules : null, timeframe,
-      copyWallets: policy.strategy === 4 ? copyWallets : null, signal: controller.signal, load,
+      copyWallets: policy.strategy === 4 ? copyWallets : null, birdeyeKey, signal: controller.signal, load,
       commit: (ticks, decide, eligible) => commitScan(ticks, decide, eligible, policy, controller.signal),
+      telemetry(stats) {
+        byId("scan-counts").textContent = `Löydetyt ${stats.found} · Analysoidut ${stats.analyzed} · Hylätyt ${stats.rejected} · Hyväksytyt ${stats.approved}`;
+        byId("scan-queue").textContent = `Jono ${stats.queued} · Käsittelyssä ${stats.processing} · Uudelleenhaku ${stats.waiting} · Ohitetut ${stats.dropped} · PumpPortal ${stats.pump}${stats.sourceError ? ` · ${stats.sourceError}` : ""}`;
+      },
       report(message, portfolio, ticks) {
         if (controller.signal.aborted) return;
         byId("scan-status").textContent = message;
@@ -297,6 +304,10 @@ async function startScan() {
 
 async function trade(mode) {
   if (emergency || changingInterlock || run || signing || document.visibilityState !== "visible") return;
+  if (mode === "paper" && settings.strategy >= 5) {
+    await startScan();
+    return;
+  }
   const real = mode === "real";
   if (real && (!wallet || !live.ready ||
       !confirm("Käynnistetäänkö Live Trading yhdistetyllä Solana-lompakolla?"))) return;
@@ -318,7 +329,7 @@ async function trade(mode) {
   byId("price").textContent = "—";
   byId("status").textContent = mode === "demo" ? "Ajetaan testisarjaa…" : "Haetaan hintaa…";
   const policy = mode === "demo"
-    ? { ...defaults, minLiquidity: 0, cooldownSeconds: 0, feeBps: 0, slippageBps: 0 }
+    ? { ...defaults, strategy: 0, minLiquidity: 0, cooldownSeconds: 0, feeBps: 0, slippageBps: 0 }
     : settings;
   const historyKey = real ? `history:live:${address}` : `history:${key}`;
   const history = [];
@@ -500,6 +511,7 @@ byId("settings").onsubmit = async event => {
     ));
     await stored("settings", updated);
     settings = updated;
+    setButtons();
     byId("status").textContent = "Asetukset tallennettu.";
   } catch (error) {
     byId("status").textContent = error.message;
