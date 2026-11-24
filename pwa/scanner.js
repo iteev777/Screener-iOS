@@ -214,6 +214,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   let processing = 0;
   let routeBusy = false;
   let activeWorkers = 0;
+  const workerLimit = Math.max(1, Math.min(24, Math.floor(policy.analysisWorkers ?? 24)));
+  let adaptiveLimit = Math.min(4, workerLimit);
+  let marketCooldown = 0;
+  let nextMarketRequest = 0;
+  let lastScale = 0;
   let rugActive = 0;
   let rugCooldown = 0;
   let analysisMs = 0;
@@ -224,7 +229,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   let copySignals = new Map();
   let copyAt = 0;
   const usedPrices = new Map();
-  const show = () => { if (!signal.aborted) telemetry?.({ ...queue.snapshot(Date.now()), processing, activeWorkers, averageAnalysisMs: analysisBatches ? Math.round(analysisMs / analysisBatches) : 0, pump, sourceError, sources: sources.map(s => ({name:s.name,count:s.count ?? 0,busy:!!s.busy,error:s.error ?? ""})) }); };
+  const show = () => { if (!signal.aborted) telemetry?.({ ...queue.snapshot(Date.now()), processing, activeWorkers, workerLimit, adaptiveLimit, averageAnalysisMs: analysisBatches ? Math.round(analysisMs / analysisBatches) : 0, pump, sourceError, sources: sources.map(s => ({name:s.name,count:s.count ?? 0,busy:!!s.busy,error:s.error ?? ""})) }); };
   watchPumpPortal(signal, mint => add([mint], "PumpPortal"), status => {
     pump = status;
     show();
@@ -262,16 +267,26 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
     }
   }
 
-  async function analyze() {
+  async function analyze(workerId) {
     let failures = 0;
     while (!signal.aborted) {
       const started = Date.now();
+      if (started - lastScale >= 5000 && started >= marketCooldown) {
+        lastScale = started;
+        const demand = Math.max(1, Math.ceil(queue.snapshot(started).queued / 30) + activeWorkers);
+        adaptiveLimit = Math.min(workerLimit, demand, adaptiveLimit + 1);
+      }
+      if (workerId >= adaptiveLimit || started < marketCooldown || started < nextMarketRequest) {
+        await pause(250, signal);
+        continue;
+      }
       const batch = queue.take(started);
       if (!batch.length) {
         show();
         await pause(500, signal);
         continue;
       }
+      nextMarketRequest = started + 350;
       processing += batch.length;
       activeWorkers++;
       show();
@@ -385,7 +400,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           .sort((a, b) => b.priority - a.priority).slice(0, 120);
         failures = 0;
       } catch (error) {
-        if (!signal.aborted) sourceError = `Analyysihaku: ${error.message}`;
+        if (!signal.aborted) {
+          sourceError = `Analyysihaku: ${error.message}`;
+          adaptiveLimit = Math.max(1, Math.floor(adaptiveLimit / 2));
+          marketCooldown = Date.now() + (error.status === 429 ? 60000 : 3000);
+        }
         failures++;
       } finally {
         queue.release(batch, Date.now());
@@ -534,5 +553,5 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
     }
   }
 
-  await Promise.all([discover(), ...Array.from({length:4}, () => analyze()), enrich(), positions()]);
+  await Promise.all([discover(), ...Array.from({length:workerLimit}, (_, id) => analyze(id)), enrich(), positions()]);
 }
