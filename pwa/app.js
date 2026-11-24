@@ -1,6 +1,6 @@
 import { devnetBalance, newDevnetWallet, reconcileDevnet, submitDevnetMemo } from "./devnet.js";
 import { advancePortfolio, newPortfolio, runScanner, scanKey } from "./scanner.js";
-import { createLiveAdapter } from "./live-adapter.js";
+import { reconcileLiveSignature, createLiveAdapter } from "./live-adapter.js";
 
 import { currentMarket, watchSlots } from "./network.js";
 import { applyPaperFill, defaults, orderFor, reasons, validateSettings } from "./policy.js";
@@ -81,6 +81,38 @@ function stored(key, value) {
     transaction.oncomplete = () => resolve(request.result);
     transaction.onabort = () => reject(transaction.error);
   });
+}
+
+// Persistent wallet-scoped journal. Reserve before submission, reconcile before retry.
+async function liveJournal(account, record) {
+  if(!solanaAddress.test(account))throw new Error("Virheellinen lompakko");
+  const key="live-journal:"+account;
+  return new Promise((resolve,reject)=>{
+    const tx=database.transaction("books","readwrite"), store=tx.objectStore("books"), req=store.get(key);
+    let rows;
+    req.onsuccess=()=>{
+      rows=req.result??[];
+      if(!record)return;
+      const previous=rows.find(x=>x.id===record.id);
+      if(record.state==="reserved"){
+        if(previous||rows.some(x=>["reserved","pending","unknown"].includes(x.state))){tx.abort();return;}
+      }else if(!previous||!["reserved","pending","unknown"].includes(previous.state)){tx.abort();return;}
+      rows=[{...previous,...record,updatedAt:Date.now()},...rows.filter(x=>x.id!==record.id)].slice(0,200);
+      store.put(rows,key);
+    };
+    tx.oncomplete=()=>resolve(rows);
+    tx.onabort=()=>reject(tx.error??new Error("Live-tapahtuma on lukittu tai odottaa vahvistusta"));
+  });
+}
+async function reconcileLiveJournal(account,signal){
+  const rows=await liveJournal(account);
+  for(const row of rows){
+    if(signal.aborted)break;
+    if(!row.signature||!["pending","unknown"].includes(row.state))continue;
+    const status=await reconcileLiveSignature(row.signature,signal);
+    await liveJournal(account,{id:row.id,...status});
+  }
+  return liveJournal(account);
 }
 
 function openDatabase() {
@@ -608,6 +640,8 @@ byId("connect").onclick = async () => {
     const snapshot = await live.snapshot(address, new AbortController().signal);
     if (version === viewVersion && wallet === address && !run) {
       renderLive(snapshot);
+      const journal=await reconcileLiveJournal(address,new AbortController().signal);
+      if(journal.some(row=>["reserved","pending","unknown"].includes(row.state)))logEvent("Live: keskeneräinen tapahtuma vaatii selvityksen.");
       const swaps = await stored(settlementKey(address)) ?? [];
       if (version !== viewVersion || wallet !== address || run) return;
       renderSettlements(swaps);
