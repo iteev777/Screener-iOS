@@ -213,6 +213,8 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   let sourceError = "";
   let processing = 0;
   let routeBusy = false;
+  const poolCache=new Map(), poolPending=new Set(), rugPending=new Set();
+  let poolActive=0;
   let activeWorkers = 0;
   const workerLimit = Math.max(1, Math.min(24, Math.floor(policy.analysisWorkers ?? 24)));
   let adaptiveLimit = Math.min(4, workerLimit);
@@ -310,20 +312,29 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         for (const cache of [mintCache, rugCache, routeCache]) {
           for (const [token, value] of cache) if (value.expires <= now) cache.delete(token);
         }
-        const possible = ranked.filter(row => row.decision === "approve");
+        const possible = ranked.filter(row => row.decision === "approve").sort((a,b)=>((b.strategy?.score??0)+(b.profile==="sniper"?12:0))-((a.strategy?.score??0)+(a.profile==="sniper"?12:0)));
+        for(const [key,value] of poolCache)if(value.expires<=Date.now())poolCache.delete(key);
+        const poolJobs=policy.strategy>=5?possible.filter(({pair})=>!poolCache.has(positionKey(pair.market))&&!poolPending.has(positionKey(pair.market))).slice(0,Math.max(0,2-poolActive)):[];
+        const poolWork=Promise.all(poolJobs.map(async ({pair})=>{
+          const market=pair.market,key=positionKey(market);poolPending.add(key);poolActive++;
+          try{let [pool]=await verifyPools([market],signal);if(pool.status==="approve")pool={...pool,...await verifyPoolReserves(market,signal)};poolCache.set(key,{...pool,expires:Date.now()+8000});}
+          catch(error){poolCache.set(key,{status:"watch",reason:error.message,expires:Date.now()+5000});}
+          finally{poolPending.delete(key);poolActive--;}
+        }));
         const needMint = possible.filter(row => !mintCache.has(row.item.token)).map(row => row.item.token);
-        try {
+        const mintWork=(async()=>{try {
           const checked = await scanMints(needMint, signal);
           if (signal.aborted) return;
           for (const token of needMint) mintCache.set(token, { ok: checked.get(token) === true, expires: now + 300000 });
         } catch (error) {
           sourceError = `Minttitarkistus: ${error.message}`;
-        }
+        }})();
         const rugCeiling = policy.rugScore || (policy.strategy >= 5 ? 30 : 0);
         if (rugCeiling > 0 && !signal.aborted && Date.now() >= rugCooldown) {
-          const needRug = possible.filter(({ item }) => mintCache.get(item.token)?.ok && !rugCache.has(item.token)).slice(0, Math.max(0, Math.min(2, 4 - rugActive)));
+          const needRug = possible.filter(({ item }) => !rugCache.has(item.token) && !rugPending.has(item.token)).slice(0, Math.max(0, Math.min(2, 4 - rugActive)));
           rugActive += needRug.length;
           await Promise.all(needRug.map(async ({ item }) => {
+            rugPending.add(item.token);
             try {
               const suffix = policy.strategy >= 5 ? "report" : "report/summary";
               const raw = await fetchJson(`https://api.rugcheck.xyz/v1/tokens/${item.token}/${suffix}`, {}, signal);
@@ -335,22 +346,20 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
               rugCache.set(item.token, { ok: null, expires: now + 30000 });
               sourceError = `RugCheck: ${error.message}`;
               if (error.status === 429) rugCooldown = Date.now() + 60000;
-            } finally { rugActive--; }
+            } finally { rugActive--; rugPending.delete(item.token); }
           }));
         }
+        await Promise.all([mintWork,poolWork]);
         if (signal.aborted) return;
         if (policy.strategy >= 5 && !routeBusy && Date.now() >= nextJupiter) {
           const next = possible.find(({ item, pair }) => mintCache.get(item.token)?.ok &&
-            rugCache.get(item.token)?.ok && !routeCache.has(positionKey(pair.market)));
+            rugCache.get(item.token)?.ok && poolCache.has(positionKey(pair.market)) && !routeCache.has(positionKey(pair.market)));
           if (next) {
             const market = next.pair.market;
             routeBusy = true;
             try {
-              let [pool] = await verifyPools([market], signal);
-              if (pool.status === "approve") {
-                const reserves = await verifyPoolReserves(market, signal);
-                pool = { ...pool, ...reserves };
-              }
+              const pool = poolCache.get(positionKey(market));
+              if(!pool || pool.expires<=Date.now())throw new Error("Poolitarkistus vanhentui");
               if (pool.status !== "approve") {
                 routeCache.set(positionKey(market), { ...pool, expires: Date.now() + 30000 });
               } else {
