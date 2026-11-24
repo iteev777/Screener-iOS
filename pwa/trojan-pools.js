@@ -362,3 +362,36 @@ export function decodeArrayLevels(protocol,b,index,spacing){
   }
   return levels;
 }
+
+/* Indicative exact-input bin traversal. Caller supplies a verified fee bound.
+   Never use an incomplete traversal as an executable quote. */
+export function estimateBinSwap(snapshot,inputRaw,swapXForY,feeBps){
+  if(snapshot.protocol!=="Meteora DLMM"||!snapshot.range||!Array.isArray(snapshot.arrays))throw new Error("DLMM snapshot required");
+  if(!Number.isInteger(feeBps)||feeBps<0||feeBps>=10000)throw new Error("Verified fee bound required");
+  const Q=1n<<64n,den=10000n,rate=den-BigInt(feeBps),ceil=(a,b)=>(a+b-1n)/b;
+  const input=BigInt(inputRaw);
+  if(input<=0n)throw new Error("Positive input required");
+  let remaining=input,out=0n,fees=0n,bins=0;
+  const active=snapshot.range.activeBin,idx=snapshot.range.arrayIndex;
+  const arrays=new Map(snapshot.arrays.filter(a=>a.status==="verified").map(a=>[a.index,a]));
+  for(let j=0;j<3&&remaining>0n;j++){
+    const array=arrays.get(idx+(swapXForY?-j:j));
+    if(!array)break;
+    const levels=array.levels.filter(l=>swapXForY?l.bin<=active:l.bin>=active).sort((a,b)=>swapXForY?b.bin-a.bin:a.bin-b.bin);
+    for(const l of levels){
+      const p=BigInt(l.priceX64),capacity=BigInt(swapXForY?l.amountY:l.amountX);
+      if(p<=0n||capacity<=0n)continue;
+      const netCapacity=swapXForY?ceil(capacity*Q,p):ceil(capacity*p,Q);
+      const grossCapacity=ceil(netCapacity*den,rate);
+      const gross=remaining<grossCapacity?remaining:grossCapacity;
+      const net=gross*rate/den;
+      const calculated=swapXForY?net*p/Q:net*Q/p;
+      const received=calculated<capacity?calculated:capacity;
+      if(received<=0n)continue;
+      out+=received;remaining-=gross;fees+=gross-net;bins++;
+      if(!remaining)break;
+    }
+  }
+  const spent=input-remaining;
+  return {complete:remaining===0n&&out>0n,inputRaw:input.toString(),spentRaw:spent.toString(),outputRaw:out.toString(),unfilledRaw:remaining.toString(),feeRaw:fees.toString(),binsCrossed:bins,indicative:true};
+}
