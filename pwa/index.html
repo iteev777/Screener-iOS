@@ -8,11 +8,12 @@
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./icon-192.png">
 <link rel="stylesheet" href="./style.css">
-<title>Screener Paper</title>
+<title>Screener iOS</title>
 </head>
 <body>
 <main>
-<header><p>Solana · Kaupankäynti</p><h1>Screener Paper</h1></header>
+<header><p>Solana · Kaupankäynti</p><h1>Screener iOS</h1></header>
+<nav id="dashboard-nav" aria-label="Dashboard"><button type="button" data-view="home" aria-pressed="true">Home</button><button type="button" data-view="tokens">Tokens</button><button type="button" data-view="positions">Positions</button><button type="button" data-view="trader">Trader</button><button type="button" data-view="settings">Settings</button></nav>
 <section class="trade-console" aria-label="Kaupankäynnin hallinta">
 <div class="console-head">
 <label for="mode">Kaupankäyntitila</label><span id="run-state" aria-live="polite">Pysäytetty</span>
@@ -31,14 +32,14 @@
 </div>
 <p id="status" role="status">Ladataan WebAssembly-moottoria…</p>
 </section>
-<div class="overview">
+<div class="overview" data-page="home">
 <section aria-label="Markkina"><h2 id="market-title">SOL / USD</h2><strong id="price">—</strong><p id="source">Valitse hintalähde.</p><p>Solana WebSocket · slot <span id="slot">—</span></p></section>
 <section aria-label="Salkku"><h2 id="book-title">Paperisalkku</h2><strong id="equity">—</strong><p id="balance"></p><p id="position"></p></section>
 </div>
-<details id="open-panel"><summary>Avoimet paperipositiot</summary>
+<details id="open-panel" data-page="positions"><summary>Avoimet paperipositiot</summary>
 <p id="no-open-positions">Ei avoimia positioita.</p><ul id="open-positions"></ul>
 </details>
-<details id="devnet-panel" hidden><summary>Devnet-tapahtumatesti</summary>
+<details data-page="settings" id="devnet-panel" hidden><summary>Devnet-tapahtumatesti</summary>
 <p id="devnet-wallet"></p>
 <button id="devnet-copy" class="secondary" type="button" disabled>Kopioi Devnet-osoite</button>
 <div class="controls">
@@ -48,7 +49,7 @@
 <button id="devnet-sync" type="button" disabled>Tarkista Devnet-vahvistus</button>
 </div><p id="devnet-status" role="status"></p><p id="devnet-history"></p>
 </details>
-<details id="scan-panel"><summary>Automaattinen Paper-salkku</summary>
+<details id="scan-panel" data-page="tokens"><summary>Automaattinen Paper-salkku</summary>
 <p id="scan-status" role="status"></p>
 <p id="scan-counts">Löydetyt 0 · Analysoidut 0 · Hylätyt 0 · Hyväksytyt 0</p>
 <p id="scan-queue">Jono 0 · Uudelleenhaku 0</p>
@@ -59,8 +60,8 @@
 <h2>Seuratut markkinat</h2><ul id="scan-markets"></ul>
 <h2>Avoimet skannauspositiot</h2><ul id="scan-positions"></ul>
 <h2>Skannauksen kaupat</h2><ol id="scan-trades"></ol></details>
-<section><h2 id="trades-title">Simuloidut kaupat</h2><p id="stats"></p><ol id="trades"></ol><p id="empty">Ei tapahtumia.</p></section>
-<details><summary>Strategia ja riskirajat</summary>
+<section data-page="positions"><h2 id="trades-title">Simuloidut kaupat</h2><p id="stats"></p><ol id="trades"></ol><p id="empty">Ei tapahtumia.</p></section>
+<details data-page="settings"><summary>Strategia ja riskirajat</summary>
 <form id="settings">
 <fieldset id="settings-fields" disabled>
 <label>Strategia<select name="strategy"><option value="0">RSI</option><option value="1">EMA-risteys</option><option value="2">Hintamurto</option><option value="3">Oma ehtopuu</option><option value="4">Copy Trading (Paper)</option><option value="5">Trojan V2 Main</option><option value="6">Trojan V2 Sniper</option><option value="7">Trojan V2 Main + Sniper</option></select></label>
@@ -112,7 +113,7 @@
 <button>Tallenna asetukset</button>
 </fieldset>
 </form></details>
-<details><summary>Markkinahaku ja OHLCV</summary>
+<details data-page="tokens"><summary>Markkinahaku ja OHLCV</summary>
 <form id="market-search">
 <label>Token tai osoite<input name="query" maxlength="100"></label>
 <label>Vähimmäislikviditeetti, USD<input name="liquidity" type="number" min="0" value="10000" required></label>
@@ -124,7 +125,7 @@
 <button id="load-candles" type="button">Hae OHLCV</button>
 <p id="candle-status" role="status"></p><ol id="candles"></ol>
 </details>
-<details><summary>Oma ehtopuu</summary>
+<details data-page="settings"><summary>Oma ehtopuu</summary>
 <form id="rules"><fieldset id="rule-fields" disabled>
 <label>OHLCV-aikaväli<select id="timeframe"><option>1m</option><option selected>5m</option><option>15m</option><option>1h</option><option>4h</option><option>1d</option></select></label>
 <label>Entry- ja exit-ehdot (JSON)<textarea id="rule-json" required rows="8">{
@@ -134,12 +135,12 @@
 <button>Tallenna ehtopuut</button>
 </fieldset></form>
 </details>
-<details><summary>Copy Trading</summary>
+<details data-page="trader"><summary>Copy Trading</summary>
 <form id="copy-settings"><fieldset id="copy-fields" disabled>
 <label>Seurattavat Solana-lompakot (enintään 4, yksi rivillä)<textarea id="copy-wallet" required maxlength="200" rows="4"></textarea></label>
 <button>Tallenna lompakko</button>
 </fieldset></form></details>
-<section id="settlement-panel" hidden><h2>Ketjussa vahvistetut Jupiter/USDC-kaupat</h2>
+<section data-page="trader" id="settlement-panel" hidden><h2>Ketjussa vahvistetut Jupiter/USDC-kaupat</h2>
 <button id="sync-swaps" type="button" hidden>Synkronoi lompakon kaupat</button><ol id="settlements"></ol>
 <h2>Jupiter-hinta-arvio</h2>
 <form id="quote-form">
@@ -149,8 +150,9 @@
 <div class="controls"><button>Hae hinta-arvio</button>
 <button id="simulate-swap" value="simulate" disabled>Muodosta ja simuloi swap</button></div>
 </form><p id="quote-result" role="status"></p></section>
-<details><summary>Botin toimintaloki</summary><ol id="activity"></ol></details>
+<details data-page="home"><summary>Botin toimintaloki</summary><ol id="activity"></ol></details>
 <footer><a href="./LICENSE">Alkuperäinen lisenssi · BUSL-1.1</a></footer>
 </main>
 <script type="module" src="./app.js"></script>
+<script type="module" src="./dashboard-nav.js"></script>
 </body></html>
