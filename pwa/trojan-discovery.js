@@ -18,15 +18,21 @@ function items(payload) {
   if (Array.isArray(data)) return data;
   return ["items","tokens","token_list","results"].map(k => data?.[k]).find(Array.isArray) ?? [];
 }
+function metadata(row) {
+  return { name: row?.name ?? row?.tokenMeta?.name, symbol: row?.symbol ?? row?.tokenMeta?.symbol,
+    creator: row?.creator ?? row?.traderPublicKey, icon: row?.icon ?? row?.logoURI ?? row?.logo,
+    priceUsd: row?.usdPrice ?? row?.priceUsd, liquidityUsd: row?.liquidity_usd ?? row?.liquidity,
+    marketCap: row?.mcap ?? row?.marketCap, fdv: row?.fdv, volume24h: row?.volume_24h_usd ?? row?.v24hUSD };
+}
 export function sourcesFor(birdeyeKey) {
   const sources = endpoints.map(([name, path, interval]) => ({ name, interval, load: async signal => {
     const rows = await fetchJson(dex + path, {}, signal);
     if (!Array.isArray(rows)) throw new Error("Virheellinen syöte");
-    return rows.filter(row => row?.chainId === "solana").map(row => row.tokenAddress);
+    return rows.filter(row => row?.chainId === "solana").map(row => ({...metadata(row),token:row.tokenAddress}));
   } }));
   for (const feed of ["new_pools", "trending_pools"]) {
     sources.push({ name: `GeckoTerminal ${feed}`, interval: 30000,
-      load: async signal => (await discoverMarkets(feed, { liquidity: 0, volume: 0 }, signal)).map(row => row.token) });
+      load: async signal => (await discoverMarkets(feed, { liquidity: 0, volume: 0 }, signal)).map(row => ({...metadata(row),token:row.token})) });
   }
   if (birdeyeKey) sources.push({ name: "Birdeye", interval: 60000, load: async signal => {
     const base = "https://public-api.birdeye.so/defi";
@@ -40,12 +46,11 @@ export function sourcesFor(birdeyeKey) {
     }
     const rows = result?.data?.items ?? result?.data?.tokens;
     if (result?.success === false || !Array.isArray(rows)) throw new Error("Virheellinen Birdeye-syöte");
-    return rows.map(row => row?.address);
+    return rows.map(row => ({...metadata(row),token:row?.address ?? row?.tokenAddress}));
   } });
   const feed = (name, url, interval, mint, options = {}) => ({
     name, interval, load: async signal => items(await fetchJson(url, options, signal))
-      .map(row => ({ token: mint(row), name: row?.name ?? row?.tokenMeta?.name,
-        symbol: row?.symbol ?? row?.tokenMeta?.symbol })).filter(row => address.test(row.token ?? ""))
+      .map(row => ({ ...metadata(row), token: mint(row) })).filter(row => address.test(row.token ?? ""))
   });
   for (const endpoint of ["new_tokens","recent","trending","verified"])
     sources.push(feed("RugCheck " + endpoint, "https://api.rugcheck.xyz/v1/stats/" + endpoint, 45000, r => r?.mint ?? r?.address));
@@ -62,7 +67,7 @@ export function sourcesFor(birdeyeKey) {
     catch (e) { if (![400,404,422].includes(e.status)) throw e;
       raw = await fetchJson(base + "/token_trending?sort_by=rank&sort_type=asc&interval=1h&limit=20",options,signal); }
     if (raw?.success === false) throw new Error("Birdeye listing failure");
-    return items(raw).map(r => ({token:r.address ?? r.tokenAddress,name:r.name,symbol:r.symbol}));
+    return items(raw).map(r => ({...metadata(r),token:r.address ?? r.tokenAddress}));
   }});
   return sources;
 }
@@ -139,11 +144,11 @@ export class CandidateQueue {
     const discovered = [];
     for (const value of tokens) {
       const token = typeof value === "string" ? value : value?.token;
-      const metadata = typeof value === "object" && value ? {name:value.name,symbol:value.symbol,creator:value.creator} : {};
+      const details = typeof value === "object" && value ? Object.fromEntries(Object.entries(metadata(value)).filter(([,v]) => v !== undefined && v !== null)) : {};
       if (typeof token !== "string" || !address.test(token)) continue;
       const item = this.sniperItems.get(token) ?? this.items.get(token);
       if (item) {
-        for (const [key,val] of Object.entries(metadata)) if (val && !item[key]) item[key] = val;
+        for (const [key,val] of Object.entries(details)) if (val && !item[key]) item[key] = val;
         if (!item.sources.has(source)) {
           item.sources.add(source);
           item.due = Math.min(item.due, now);
@@ -159,7 +164,7 @@ export class CandidateQueue {
         this.stats.dropped++;
         continue;
       }
-      target.set(token, { ...metadata, token, sources: new Set([source]), due: now, seen: now, lastSeen: now, attempts: 0 });
+      target.set(token, { ...details, token, sources: new Set([source]), due: now, seen: now, lastSeen: now, attempts: 0 });
       this.stats.found++;
       discovered.push(token);
     }
