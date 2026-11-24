@@ -250,7 +250,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           source.failures++;
           source.error = error.message;
         } finally {
-          source.due = Date.now() + Math.min(300000, source.interval * 2 ** Math.min(source.failures, 4));
+          source.due = Date.now() + Math.min(Math.max(300000, source.interval), source.interval * 2 ** Math.min(source.failures, 4));
           if (!source.failures) source.due = Date.now() + source.interval;
           source.busy = false;
           show();
@@ -377,7 +377,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           queue.finish(item, checked, pair?.raw, now);
           if (checked === "approve") {
             if (route) item.due = Math.min(item.due, route.expires);
-            candidates.push({ ...pair.market, tradeStrategy: profile === "sniper" ? 6 : 5, at: now, priority: item.priority, routeExpires: route?.expires });
+            candidates.push({ ...pair.market, tradeStrategy: policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: now, priority: item.priority, routeExpires: route?.expires });
           }
         }
         approvedTicks = [...candidates, ...approvedTicks.filter(tick => !batch.some(item => item.token === tick.token))]
