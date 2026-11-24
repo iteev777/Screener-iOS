@@ -327,6 +327,38 @@ async function inspectArrays(protocol,pool,program,current,previous,accounts,add
     const poolOffset=protocol==="Meteora DLMM"?24:protocol==="Orca Whirlpool"?9956:8;
     const index=protocol==="Meteora DLMM"?Number(v.getBigInt64(8,true)):v.getInt32(protocol==="Orca Whirlpool"?8:40,true);
     if(index!==expected||!equal(b.slice(poolOffset,poolOffset+32),key))throw new Error("Array pooli tai indeksi virheellinen");
-    return {address:addresses[i],status:"verified",index,byteLength:b.length};
+    return {address:addresses[i],status:"verified",index,byteLength:b.length,levels:decodeArrayLevels(protocol,b,index,current.tickSpacing)};
   });
+}
+
+export function decodeArrayLevels(protocol,b,index,spacing){
+  const v=new DataView(b.buffer,b.byteOffset,b.byteLength);
+  const u128=o=>v.getBigUint64(o,true)+(v.getBigUint64(o+8,true)<<64n);
+  const i128=o=>BigInt.asIntN(128,u128(o));
+  const levels=[];
+  if(protocol==="Orca Whirlpool"){
+    if(b.length!==9988)throw new Error("Whirlpool fixed array layout unsupported");
+    for(let i=0;i<88;i++){
+      const o=12+i*113;
+      if(b[o]>1)throw new Error("Invalid initialized flag");
+      if(b[o])levels.push({tick:index+i*spacing,liquidityNet:i128(o+1).toString(),liquidityGross:u128(o+17).toString()});
+    }
+  }else if(protocol==="Raydium CLMM"){
+    if(b.length!==10240)throw new Error("CLMM array layout unsupported");
+    for(let i=0;i<60;i++){
+      const o=44+i*168,gross=u128(o+20);
+      if(gross){
+        const tick=v.getInt32(o,true);
+        if(tick!==index+i*spacing)throw new Error("Tick index mismatch");
+        levels.push({tick,liquidityNet:i128(o+4).toString(),liquidityGross:gross.toString()});
+      }
+    }
+  }else if(protocol==="Meteora DLMM"){
+    if(b.length!==10136)throw new Error("DLMM array layout unsupported");
+    for(let i=0;i<70;i++){
+      const o=56+i*144,x=v.getBigUint64(o,true),y=v.getBigUint64(o+8,true);
+      if(x||y)levels.push({bin:index*70+i,amountX:x.toString(),amountY:y.toString(),priceX64:u128(o+16).toString()});
+    }
+  }
+  return levels;
 }
