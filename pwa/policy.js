@@ -1,4 +1,6 @@
 export const defaults = Object.freeze({
+mainOrderUsd: 5, mainStop: 9, mainProfit: 8, mainProfitShare: 50, mainFinalProfit: 10, mainTrailing: 3.5, mainBreakEven: 4, mainHoldMinutes: 15, mainDca: 0, mainDcaDrop: 5, sniperOrderUsd: 5, sniperStop: 9, sniperProfit: 8, sniperProfitShare: 50, sniperFinalProfit: 10, sniperTrailing: 3.5, sniperBreakEven: 4, sniperHoldMinutes: 15, sniperDca: 0, sniperDcaDrop: 5,
+
   maxMainPositions: 10, maxSniperPositions: 10, maxTotalPositions: 15, balanceFraction: 10, dcaDrop: 5,
   strategy: 0, orderUsd: 100, exposureUsd: 200, lossUsd: 50, stop: 5, profit: 10, profitShare: 100, finalProfit: 20,
   trailing: 5, breakEven: 5, holdMinutes: 240, cooldownSeconds: 60,
@@ -6,6 +8,8 @@ export const defaults = Object.freeze({
 });
 
 const limits = {
+mainOrderUsd: [1,500], mainStop: [0.1,50], mainProfit: [0.1,500], mainProfitShare: [1,100], mainFinalProfit: [0.1,500], mainTrailing: [0,50], mainBreakEven: [0,100], mainHoldMinutes: [1,1440], mainDca: [0,1], mainDcaDrop: [0.1,49], sniperOrderUsd: [1,500], sniperStop: [0.1,50], sniperProfit: [0.1,500], sniperProfitShare: [1,100], sniperFinalProfit: [0.1,500], sniperTrailing: [0,50], sniperBreakEven: [0,100], sniperHoldMinutes: [1,1440], sniperDca: [0,1], sniperDcaDrop: [0.1,49],
+
   maxMainPositions: [1,30], maxSniperPositions: [1,30], maxTotalPositions: [1,30], balanceFraction: [1,100], dcaDrop: [0.1,49],
   strategy: [0, 7], orderUsd: [1, 500], exposureUsd: [1, 1000], lossUsd: [1, 1000],
   stop: [0.1, 50], profit: [0.1, 500], profitShare: [1, 100], finalProfit: [0.1, 500], trailing: [0, 50], breakEven: [0, 100],
@@ -27,7 +31,19 @@ export function validateSettings(input) {
       (settings.profitShare < 100 && settings.finalProfit <= settings.profit)) {
     throw new Error("Tarkista strategia, lisäostot, enimmäispositio ja voittotavoitteiden järjestys.");
   }
+  for (const p of ['main','sniper']) {
+    const s = strategySettings(settings, p === 'main' ? 5 : 6);
+    if (!Number.isInteger(s.dca) || s.orderUsd > s.exposureUsd || (s.profitShare < 100 && s.finalProfit <= s.profit)) throw new Error('Virheelliset '+p+'-asetukset');
+  }
   return settings;
+}
+
+export function strategySettings(policy, strategy) {
+  if (strategy !== 5 && strategy !== 6) return policy;
+  const prefix = strategy === 5 ? 'main' : 'sniper';
+  const result = {...policy};
+  for (const name of ["orderUsd","stop","profit","profitShare","finalProfit","trailing","breakEven","holdMinutes","dca","dcaDrop"]) { const k = prefix + name[0].toUpperCase() + name.slice(1); result[name] = policy[k] ?? policy[name]; }
+  return result;
 }
 
 export const reasons = ["", "Stop loss", "Break-even", "Trailing stop", "Aikaraja",
