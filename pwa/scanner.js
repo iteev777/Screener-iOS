@@ -214,6 +214,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   let processing = 0;
   const routePending=new Set();
   let routeActive=0, routeLimit=2;
+  const sellPoolCache=new Map(), sellPoolPending=new Set();
   const poolCache=new Map(), poolPending=new Set(), rugPending=new Set(), mintPending=new Set();
   let poolActive=0;
   let activeWorkers = 0;
@@ -477,6 +478,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
       try {
         const portfolio = await load();
         const held = Object.values(portfolio.positions).map(position => position.market);
+        for(const [key,value] of sellPoolCache)if(value.expires<=Date.now())sellPoolCache.delete(key);
+        for(const market of held.filter(m=>m.quoteToken&&!sellPoolCache.has(positionKey(m))&&!sellPoolPending.has(positionKey(m))).slice(0,Math.max(0,2-sellPoolPending.size))){
+          const key=positionKey(market);sellPoolPending.add(key);
+          void verifyPoolReserves(market,signal).then(pool=>{if(!signal.aborted)sellPoolCache.set(key,{...pool,expires:Date.now()+8000});}).catch(()=>{if(!signal.aborted)sellPoolCache.set(key,{expires:Date.now()+10000});}).finally(()=>sellPoolPending.delete(key));
+        }
         const now = Date.now();
         const candidates = approvedTicks.filter(tick => now >= tick.at && now - tick.at <= maxTickAge &&
           (tick.routeExpires === undefined || now <= tick.routeExpires));
@@ -502,7 +508,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         // Prioritize risk exits before computing candidate indicators.
         if(prices.length && policy.strategy>=5 && !rules && !copyWallets?.length){
           const exitAt=Date.now();
-          await commit(prices.filter(t=>exitAt>=t.at&&exitAt-t.at<=maxTickAge).map(t=>({...t,observedAt:t.at,at:exitAt,exitsOnly:true})),()=>0,()=>false);
+          await commit(prices.filter(t=>exitAt>=t.at&&exitAt-t.at<=maxTickAge).map(t=>({...t,sellPool:sellPoolCache.get(positionKey(t)),observedAt:t.at,at:exitAt,exitsOnly:true})),()=>0,()=>false);
         }
         const ticks = [...(policy.strategy>=5&&!rules&&!copyWallets?.length?[]:prices), ...candidates.filter(tick => tracked.has(positionKey(tick)) &&
           !heldKeys.has(positionKey(tick)) && usedPrices.get(positionKey(tick)) !== tick.at)];
