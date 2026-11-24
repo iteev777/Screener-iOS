@@ -165,7 +165,8 @@ function setButtons() {
   byId("emergency").textContent = emergency ? "Vapauta hätäpysäytys" : "Hätäpysäytys";
   byId("emergency").setAttribute("aria-pressed", String(emergency));
   byId("devnet-copy").disabled = !devWallet;
-  byId("run-state").textContent = emergency ? "Lukittu" : run ? "Käynnissä" : "Pysäytetty";
+  byId("run-state").textContent = changingInterlock ? "Tallennetaan…" :
+    emergency ? "Lukittu" : run ? "Käynnissä" : "Pysäytetty";
   byId("mode").disabled = busy || Boolean(signing) || Boolean(devAction);
   byId("settings-fields").disabled = busy;
   byId("rule-fields").disabled = busy;
