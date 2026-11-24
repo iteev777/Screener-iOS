@@ -81,6 +81,7 @@ export function applyPaperFill(book, order, tick, settings) {
   const slip = settings.slippageBps / 10000;
   const fee = settings.feeBps / 10000;
   const buy = order.side === "Osto";
+  let realizedPnl = null;
   const fill = price * (1 + (buy ? slip : -slip));
   if (buy) {
     const day = Math.floor(at / 86400000);
@@ -103,6 +104,7 @@ export function applyPaperFill(book, order, tick, settings) {
     const proceeds = sold * fill * (1 - fee);
     const cost = book.cost * (sold / book.sol);
     const result = proceeds - cost;
+    realizedPnl = result;
     book.cash += proceeds;
     book.realized = (book.realized ?? 0) + result;
     const day = Math.floor(at / 86400000);
@@ -119,6 +121,6 @@ export function applyPaperFill(book, order, tick, settings) {
   book.lastTradeAt = at;
   book.count = (book.count ?? 0) + 1;
   book.trades.unshift({ side: order.side, price: fill, reason: order.reason, at,
-    quantity: buy ? order.usd * (1 - fee) / fill : order.sol });
+    realizedPnl, quantity: buy ? order.usd * (1 - fee) / fill : order.sol });
   book.trades = book.trades.slice(0, 200);
 }
