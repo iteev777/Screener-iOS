@@ -615,7 +615,14 @@ byId("connect").onclick = async () => {
         "Lompakko yhdistetty. Live Tradingin toteutusadapteri puuttuu.";
     }
   } catch (error) {
-    if (version === viewVersion && !run) byId("status").textContent = error.message;
+    if (version === viewVersion && !run) {
+      byId("status").textContent = error.message;
+      if (/Phantom-lompakkoa ei löytynyt/.test(error.message)) {
+        const link=document.createElement("a");
+        link.href=live.phantomLink();link.textContent="Avaa Phantom-selaimessa";
+        link.rel="noopener noreferrer";byId("status").append(" ",link);
+      }
+    }
   } finally {
     setButtons();
   }
