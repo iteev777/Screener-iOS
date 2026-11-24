@@ -100,7 +100,7 @@ export async function verifyPoolReserves(market, signal) {
   const decoded = decodePool(account?.owner, accountBytes(account));
   if (decoded.status !== "decoded" || !decoded.baseVault || !decoded.quoteVault || !decoded.base || !decoded.quote) return { status:"watch", reason:"Reservirakenne ei ole tuettu" };
   const keys = [decoded.baseVault, decoded.quoteVault, decoded.base, decoded.quote].map(encodeKey);
-  const feeKeys = decoded.protocol === "PumpSwap" ? ["ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw","5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"] : [];
+  const feeKeys = decoded.protocol === "PumpSwap" ? ["ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw","5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"] : decoded.protocol === "Raydium CPMM" ? [encodeKey(accountBytes(account).slice(8,40))] : [];
   const snapshot = await rpcCall("getMultipleAccounts", [[market.pool, ...keys, ...feeKeys], options], signal);
   const [p, v1, v2, m1, m2, globalConfig, feeConfig] = snapshot?.value ?? [];
   if (p?.owner !== account.owner) throw new Error("Poolin omistaja vaihtui");
@@ -111,6 +111,10 @@ export async function verifyPoolReserves(market, signal) {
   const requested = publicKeyBytes(market.token), other = publicKeyBytes(market.quoteToken);
   if (!((equal(fresh.base,requested) && equal(fresh.quote,other)) || (equal(fresh.quote,requested) && equal(fresh.base,other)))) throw new Error("Poolin markkinapari vaihtui");
   const pricing = poolPricing(fresh.protocol, accountBytes(p), base, quote);
+  if (fresh.protocol === "Raydium CPMM") {
+    if (globalConfig?.owner !== p.owner || !equal(accountBytes(p).slice(8,40),accountBytes(account).slice(8,40))) throw new Error("CPMM konfiguraatio vaihtui");
+    pricing.feeBps = await decodeCpmmFees(accountBytes(globalConfig));
+  }
   if (fresh.protocol === "PumpSwap") {
     if (globalConfig?.owner !== p.owner || feeConfig?.owner !== "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ") throw new Error("PumpSwap palkkiotilien omistaja ei täsmää");
     const global = accountBytes(globalConfig);
@@ -161,4 +165,13 @@ export function decodePumpFees(raw) {
   max=Math.max(max,fees(cursor));
   if(max>=10000) throw new Error("Palkkio kuluttaa koko kaupan");
   return max;
+}
+
+export async function decodeCpmmFees(raw) {
+  const discriminator = new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode("account:AmmConfig"))).slice(0,8);
+  if(raw.length<116 || !equal(raw.subarray(0,8),discriminator)) throw new Error("CPMM AmmConfig virheellinen");
+  const v=new DataView(raw.buffer,raw.byteOffset,raw.byteLength);
+  const [trade,protocol,fund,creator]=[12,20,28,108].map(o=>v.getBigUint64(o,true));
+  if(trade+creator>=1000000n || protocol+fund>1000000n) throw new Error("CPMM palkkiot virheelliset");
+  return Number(trade+creator)/100;
 }
