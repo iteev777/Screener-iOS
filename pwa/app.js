@@ -308,7 +308,7 @@ async function startScan() {
     const rejectionReasons = new Map();
     const tokenResults = new Map();
     const filter = byId("token-status-filter"), query = byId("token-filter-query"), results = byId("token-filter-results");
-    function renderTokens(){const q=query.value.trim();const rows=[...tokenResults.values()].reverse().filter(e=>(filter.value==="all"||e.status===filter.value)&&(!q||e.mint.includes(q))).slice(0,100);results.replaceChildren(...rows.map(e=>{const li=document.createElement("li");li.textContent=`${e.mint} · ${e.status} · ${e.score??"—"}/100 · ${e.reason}`;return li;}));}
+    function renderTokens(){const q=query.value.trim();const rows=[...tokenResults.values()].reverse().filter(e=>(filter.value==="all"||e.status===filter.value)&&(!q||e.mint.includes(q))).slice(0,100);results.replaceChildren(...rows.map(e=>{const li=document.createElement("li");const label=document.createElement("p");label.textContent=`${e.mint} · ${e.status} · ${e.score??"—"}/100 · ${e.reason}`;const b=document.createElement("button");b.type="button";b.className="secondary";b.textContent="Tutki markkinaa";b.onclick=()=>{const form=byId("market-search");form.elements.query.value=e.mint;form.elements.liquidity.value="0";form.elements.volume.value="0";form.closest("details").open=true;const submit=form.querySelector("button");if(!submit.disabled)form.requestSubmit(submit);form.scrollIntoView({block:"start"});};li.append(label,b);return li;}));}
     filter.onchange=renderTokens;query.oninput=renderTokens;renderTokens();
     byId("filter-reasons").replaceChildren();
     await runScanner({ engine, policy, rules: policy.strategy === 3 ? rules : null, timeframe,
