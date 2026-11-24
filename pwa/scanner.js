@@ -214,7 +214,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   let processing = 0;
   const routePending=new Set();
   let routeActive=0, routeLimit=2;
-  const poolCache=new Map(), poolPending=new Set(), rugPending=new Set();
+  const poolCache=new Map(), poolPending=new Set(), rugPending=new Set(), mintPending=new Set();
   let poolActive=0;
   let activeWorkers = 0;
   const workerLimit = Math.max(1, Math.min(24, Math.floor(policy.analysisWorkers ?? 24)));
@@ -322,14 +322,16 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           catch(error){poolCache.set(key,{status:"watch",reason:error.message,expires:Date.now()+5000});}
           finally{poolPending.delete(key);poolActive--;}
         }));
-        const needMint = possible.filter(row => !mintCache.has(row.item.token)).map(row => row.item.token);
+        const needMint = possible.filter(row => !mintCache.has(row.item.token)&&!mintPending.has(row.item.token)).map(row => row.item.token);
+        for(const token of needMint)mintPending.add(token);
         const mintWork=(async()=>{try {
+          if(!needMint.length)return;
           const checked = await scanMints(needMint, signal);
           if (signal.aborted) return;
           for (const token of needMint) mintCache.set(token, { ok: checked.get(token) === true, expires: now + 300000 });
         } catch (error) {
           sourceError = `Minttitarkistus: ${error.message}`;
-        }})();
+        }finally{for(const token of needMint)mintPending.delete(token);}})();
         const rugCeiling = policy.rugScore || (policy.strategy >= 5 ? 30 : 0);
         if (rugCeiling > 0 && !signal.aborted && Date.now() >= rugCooldown) {
           const needRug = possible.filter(({ item }) => !rugCache.has(item.token) && !rugPending.has(item.token)).slice(0, Math.max(0, Math.min(2, 4 - rugActive)));
@@ -496,7 +498,12 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           priceError = error;
         }
         if (signal.aborted) return;
-        const ticks = [...prices, ...candidates.filter(tick => tracked.has(positionKey(tick)) &&
+        // Prioritize risk exits before computing candidate indicators.
+        if(prices.length && policy.strategy>=5 && !rules && !copyWallets?.length){
+          const exitAt=Date.now();
+          await commit(prices.filter(t=>exitAt>=t.at&&exitAt-t.at<=maxTickAge).map(t=>({...t,observedAt:t.at,at:exitAt,exitsOnly:true})),()=>0,()=>false);
+        }
+        const ticks = [...(policy.strategy>=5&&!rules&&!copyWallets?.length?[]:prices), ...candidates.filter(tick => tracked.has(positionKey(tick)) &&
           !heldKeys.has(positionKey(tick)) && usedPrices.get(positionKey(tick)) !== tick.at)];
         const at = Date.now();
         const fresh = ticks.filter(tick => at >= tick.at && at - tick.at <= maxTickAge);
