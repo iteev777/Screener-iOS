@@ -106,5 +106,31 @@ export async function verifyPoolReserves(market, signal) {
   const fresh = decodePool(p.owner, accountBytes(p));
   if (fresh.status !== "decoded" || !["baseVault","quoteVault","base","quote"].every(k => fresh[k] && equal(fresh[k], decoded[k]))) throw new Error("Poolin rakenne vaihtui");
   const base = decodeReserve(v1,m1,fresh.base), quote = decodeReserve(v2,m2,fresh.quote);
-  return { status:"approve", protocol:fresh.protocol, slot:snapshot.context?.slot, base, quote, reserveRatio:quote.amount/base.amount };
+  if (!Number.isSafeInteger(snapshot.context?.slot) || snapshot.context.slot <= 0) throw new Error("RPC-slot puuttuu");
+  const requested = publicKeyBytes(market.token), other = publicKeyBytes(market.quoteToken);
+  if (!((equal(fresh.base,requested) && equal(fresh.quote,other)) || (equal(fresh.quote,requested) && equal(fresh.base,other)))) throw new Error("Poolin markkinapari vaihtui");
+  const pricing = poolPricing(fresh.protocol, accountBytes(p), base, quote);
+  return { status:"approve", protocol:fresh.protocol, slot:snapshot.context.slot, base, quote, ...pricing };
+}
+
+export function poolPricing(protocol, bytes, base, quote) {
+  const v = new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const u64 = o => v.getBigUint64(o,true);
+  const u128 = o => u64(o) + (u64(o+8)<<64n);
+  const scale = 10 ** (base.decimals-quote.decimals);
+  let a = BigInt(base.raw), b = BigInt(quote.raw), feeBps = null, ratio, mode = "reserves";
+  if (protocol === "Raydium CPMM") {
+    a -= u64(341)+u64(357)+u64(397); b -= u64(349)+u64(365)+u64(405);
+  } else if (protocol === "Raydium AMM v4") {
+    a -= u64(192); b -= u64(200); feeBps = Number(u64(176))*10000/Number(u64(184));
+  } else if (protocol === "FluxBeam") {
+    feeBps = 10000*(Number(u64(227))/Number(u64(235))+Number(u64(243))/Number(u64(251)));
+  }
+  if (a<=0n || b<=0n) throw new Error("Käytettävät reservit tyhjät");
+  const sqrtOffset = {"Raydium CLMM":253,"Orca Whirlpool":65,"Meteora DAMM v2":456}[protocol];
+  if (sqrtOffset !== undefined) { mode="sqrt_price"; ratio=(Number(u128(sqrtOffset))/2**64)**2*scale; }
+  else if (protocol === "Meteora DLMM") { mode="active_bin"; ratio=(1+v.getUint16(80,true)/10000)**v.getInt32(76,true)*scale; }
+  else { ratio=Number(b)/Number(a)*scale; }
+  if (!Number.isFinite(ratio)||ratio<=0 || (feeBps!==null && (!Number.isFinite(feeBps)||feeBps<0||feeBps>=10000))) throw new Error("Virheellinen poolihinta tai palkkio");
+  return { priceMode:mode, spotRatio:ratio, feeBps, effectiveBaseRaw:a.toString(), effectiveQuoteRaw:b.toString() };
 }
