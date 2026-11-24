@@ -292,6 +292,7 @@ async function startScan() {
   byId("status").textContent = "Automaattinen Paper-skannaus käynnissä.";
   try {
     const load = async () => await stored(scanKey) ?? newPortfolio();
+    const samples = [];
     await runScanner({ engine, policy, rules: policy.strategy === 3 ? rules : null, timeframe,
       copyWallets: policy.strategy === 4 ? copyWallets : null, birdeyeKey, jupiterKey, simulationWallet, signal: controller.signal, load,
       event(entry) {
@@ -304,8 +305,22 @@ async function startScan() {
       },
       commit: (ticks, decide, eligible) => commitScan(ticks, decide, eligible, policy, controller.signal),
       telemetry(stats) {
+        const now = Date.now();
+        if (!samples.length || now - samples.at(-1).at >= 1000) samples.push({at:now,found:stats.found,analyzed:stats.analyzed});
+        while (samples.length > 1 && samples[1].at <= now - 60000) samples.shift();
+        const first = samples[0];
+        const elapsed = (now - first.at) / 60000;
+        const rate = key => elapsed >= 0.1 ? Math.round((stats[key] - first[key]) / elapsed) : "–";
         byId("scan-counts").textContent = `Löydetyt ${stats.found} · Analysoidut ${stats.analyzed} · Hylätyt ${stats.rejected} · Hyväksytyt ${stats.approved}`;
-        byId("scan-queue").textContent = `Jono ${stats.queued} · Käsittelyssä ${stats.processing} · Uudelleenhaku ${stats.waiting} · Ohitetut ${stats.dropped} · PumpPortal ${stats.pump}${stats.sourceError ? ` · ${stats.sourceError}` : ""}`;
+        byId("scan-queue").textContent = `Main ${stats.mainQueue ?? 0} · Sniper ${stats.sniperQueue ?? 0} · Löydöt/min ${rate("found")} · Analyysit/min ${rate("analyzed")} · Jono ${stats.queued} · Käsittelyssä ${stats.processing} · Uudelleenhaku ${stats.waiting} · Ohitetut ${stats.dropped} · PumpPortal ${stats.pump}${stats.sourceError ? ` · ${stats.sourceError}` : ""}`;
+        let panel = byId("scan-source-stats");
+        if (!panel) {
+          panel = document.createElement("pre");
+          panel.id = "scan-source-stats";
+          panel.style.whiteSpace = "pre-wrap";
+          byId("scan-queue").after(panel);
+        }
+        panel.textContent = (stats.sources ?? []).map(s => `${s.name}: ${s.count} · ${s.busy ? "Haetaan" : s.error ? "Virhe: " + s.error : "Valmis / odottaa"}`).join("\n");
       },
       report(message, portfolio, ticks) {
         if (controller.signal.aborted) return;
