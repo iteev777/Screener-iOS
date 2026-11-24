@@ -116,3 +116,22 @@ test("Devnet signature verifies exact message and rejects mutation and invalid s
   tamper = "signature";
   await assert.rejects(signDevnetProbe(wallet, address), /ei kelpaa/);
 });
+
+test("Trojan default exit policy and DCA reference cases", async () => {
+  const {strategySettings,trojanExitReason}=await import("./policy.js");
+  const p=strategySettings(defaults,5);
+  const book={cost:100,sol:1,peak:100,openedAt:0,cash:1000};
+  for(const [price,peak,at,partial,expected] of [[90,100,1000,false,1],[108.1,108.1,1000,false,5],[110.1,110.1,1000,true,5],[104,108,1000,true,3],[99,108,1000,true,0],[100,100,900000,false,4]]) {
+    assert.equal(trojanExitReason({...book,peak,profitTaken:partial},{price,at},p),expected);
+  }
+  assert.equal(orderFor(null,1,book,{price:94,at:120000,liquidity:100000},{...p,dca:1}).usd,2.5);
+});
+test("Protocol pricing uses sqrt price and active bin, not vault ratio",async()=>{
+  const {poolPricing}=await import("./trojan-pools.js");
+  const bytes=new Uint8Array(488),v=new DataView(bytes.buffer);
+  const base={raw:"100",decimals:6},quote={raw:"900",decimals:6};
+  v.setBigUint64(261,2n,true);
+  assert.equal(poolPricing("Raydium CLMM",bytes,base,quote).spotRatio,4);
+  v.setUint16(80,100,true);v.setInt32(76,2,true);
+  assert.ok(Math.abs(poolPricing("Meteora DLMM",bytes,base,quote).spotRatio-1.0201)<1e-12);
+});
