@@ -344,7 +344,7 @@ async function startScan() {
       telemetry(stats) {
       const total = stats.analyzed || 0;
       byId("filter-summary").textContent = `Analysoidut ${total} · Hyväksytyt ${stats.approved} · Hylätyt ${stats.rejected} · Odottavat ${stats.waiting}`;
-      byId("monitor-summary").textContent = `PumpPortal ${stats.pump} · Työntekijät ${stats.activeWorkers ?? 0} · Keskimääräinen analyysierä ${stats.averageAnalysisMs ?? 0} ms`;
+      byId("monitor-summary").textContent = `PumpPortal ${stats.pump} · Työntekijät ${stats.activeWorkers ?? 0}/${stats.adaptiveLimit ?? 0} (max ${stats.workerLimit ?? 24}) · Keskimääräinen analyysierä ${stats.averageAnalysisMs ?? 0} ms`;
       byId("monitor-sources").replaceChildren(...(stats.sources ?? []).map(source => {
         const p = document.createElement("p");
         p.textContent = `${source.name}: ${source.error || (source.busy ? "Haetaan" : "Viimeisin haku: "+source.count)}`;
