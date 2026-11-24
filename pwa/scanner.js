@@ -86,7 +86,7 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
   const unique = new Map(ticks.map(tick => [positionKey(tick), tick]));
   const input = [...unique.entries()].filter(([, tick]) =>
     Number.isFinite(tick.price) && tick.price > 0 && Number.isFinite(tick.at) &&
-    tick.at >= (portfolio.lastScanAt ?? 0) &&
+    tick.at > (portfolio.lastScanAt ?? 0) &&
     (tick.observedAt === undefined || (Date.now() >= tick.observedAt && Date.now() - tick.observedAt <= maxTickAge)) &&
     (!tick.exitsOnly || portfolio.positions[positionKey(tick)]));
   if (input.length) portfolio.lastScanAt = Math.max(...input.map(([, tick]) => tick.at));
