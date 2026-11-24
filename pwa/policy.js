@@ -1,3 +1,4 @@
+import { estimateBinSwap, estimateTickSwap } from "./trojan-pools.js";
 export const defaults = Object.freeze({
 mainMinLiquidity:8000,sniperMinLiquidity:2500,mainMinVolume24:10000,sniperMinVolume24:10000,mainMinVolume5:0,sniperMinVolume5:0,mainMinAge:5,sniperMinAge:0,mainMaxAge:0,sniperMaxAge:0,mainMinTrades:4,sniperMinTrades:3,mainMinTradesHour:5,sniperMinTradesHour:5,mainMinPressure:52,sniperMinPressure:52,mainMinChange5:0,sniperMinChange5:0,mainMaxChange5:8,sniperMaxChange5:8,mainMinChange1h:-25,sniperMinChange1h:-25,mainMaxChange1h:35,sniperMaxChange1h:35,mainMinChange24:-70,sniperMinChange24:-70,mainMaxVolumeRatio:15,sniperMaxVolumeRatio:15,mainMinScore:70,sniperMinScore:75,mainMinSources:1,sniperMinSources:1,mainMaxImpact:5,sniperMaxImpact:5,
 mainOrderUsd: 5, mainStop: 9, mainProfit: 8, mainProfitShare: 50, mainFinalProfit: 10, mainTrailing: 3.5, mainBreakEven: 0, mainHoldMinutes: 15, mainDca: 0, mainDcaDrop: 5, sniperOrderUsd: 5, sniperStop: 9, sniperProfit: 8, sniperProfitShare: 50, sniperFinalProfit: 10, sniperTrailing: 3.5, sniperBreakEven: 0, sniperHoldMinutes: 15, sniperDca: 0, sniperDcaDrop: 5,
@@ -160,6 +161,18 @@ export function paperExecutionCost(book,order,tick,settings){
     const reserveRaw=Number(base?pool.effectiveBaseRaw:pool.effectiveQuoteRaw), decimals=base?pool.base?.decimals:pool.quote?.decimals;
     const reserveTokens=reserveRaw/10**decimals, sold=Math.min(order.sol,book.sol);
     if(valid&&Number.isFinite(reserveTokens)&&reserveTokens>0&&Number.isFinite(pool.feeBps)){depth=sold/(reserveTokens+sold);source="verified_reserve_proxy";}
+  }
+  if(!buy&&pool?.status==="approve"&&pool.expires>=Date.now()&&["Raydium CLMM","Orca Whirlpool","Meteora DLMM"].includes(pool.protocol)){
+    try{
+      const x=pool.baseMint===tick.token;
+      if(!x&&pool.quoteMint!==tick.token)throw new Error("Mint mismatch");
+      const inputDecimals=x?pool.base.decimals:pool.quote.decimals,outputDecimals=x?pool.quote.decimals:pool.base.decimals;
+      const quantity=Math.min(order.sol,book.sol),raw=Math.floor(quantity*10**inputDecimals);
+      if(!Number.isSafeInteger(raw)||raw<=0)throw new Error("Invalid amount");
+      const result=(pool.protocol==="Meteora DLMM"?estimateBinSwap:estimateTickSwap)(pool,BigInt(raw),x,pool.feeBps);
+      const expected=quantity*(x?pool.spotRatio:1/pool.spotRatio),received=Number(result.outputRaw)/10**outputDecimals;
+      if(result.complete&&expected>0&&Number.isFinite(received)&&received>0){depth=Math.max(0,1-received/expected);source="verified_array_proxy";}
+    }catch{/* Missing or unsupported depth must not block risk exits. */}
   }
   const slip=Math.min(.99,Math.max(baseline,impact,route,depth));
   return {slip,fee:Math.max(fee,source==="verified_reserve_proxy"?pool.feeBps/10000:0),impact:Math.max(impact,depth),source};
