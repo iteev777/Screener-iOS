@@ -62,6 +62,9 @@ export async function verifyPools(rows, signal) {
     const market = rows[i];
     const base = publicKeyBytes(market.token);
     const quote = typeof market.quoteToken === "string" ? publicKeyBytes(market.quoteToken) : null;
+    if (decoded.protocol === "Moonit" || decoded.protocol === "Meteora DBC") {
+      return { status: decoded.base && equal(decoded.base,base) ? "approve" : "reject", protocol:decoded.protocol, reason:"Mintin alustava tarkistus; konfiguraatio tarkistetaan seuraavaksi" };
+    }
     if (!decoded.base || !decoded.quote || !quote) {
       return { status: "unsupported", protocol: decoded.protocol, reason: "Poolin tokenparia ei voida varmistaa tilistä" };
     }
@@ -98,6 +101,7 @@ export async function verifyPoolReserves(market, signal) {
   const first = await rpcCall("getMultipleAccounts", [[market.pool], options], signal);
   const account = first?.value?.[0];
   const decoded = decodePool(account?.owner, accountBytes(account));
+  if (decoded.status === "decoded" && ["Moonit","Meteora DBC"].includes(decoded.protocol)) return verifySpecialPool(market, account, decoded, signal);
   if (decoded.status !== "decoded" || !decoded.baseVault || !decoded.quoteVault || !decoded.base || !decoded.quote) return { status:"watch", reason:"Reservirakenne ei ole tuettu" };
   const keys = [decoded.baseVault, decoded.quoteVault, decoded.base, decoded.quote].map(encodeKey);
   const feeKeys = decoded.protocol === "PumpSwap" ? ["ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw","5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx"] : decoded.protocol === "Raydium CPMM" ? [encodeKey(accountBytes(account).slice(8,40))] : [];
@@ -198,4 +202,30 @@ export function curvePricing(protocol, bytes, decimals) {
   } else throw new Error("Tuntematon bonding curve");
   if(!Number.isFinite(priceSol)||priceSol<=0||!Number.isFinite(liquiditySol)||liquiditySol<=0) throw new Error("Käyrän hinta tai likviditeetti virheellinen");
   return {priceSol,liquiditySol,priceMode:"bonding_curve"};
+}
+
+async function verifySpecialPool(market, account, decoded, signal) {
+  const options={commitment:"confirmed",encoding:"base64"};
+  const token=publicKeyBytes(market.token);
+  if(!equal(decoded.base,token)) throw new Error("Käyrän mintti ei täsmää");
+  const isDbc=decoded.protocol==="Meteora DBC";
+  const configKey=isDbc?encodeKey(accountBytes(account).slice(72,104)):null;
+  const keys=isDbc?[market.pool,market.token,configKey,market.quoteToken]:[market.pool,market.token];
+  const result=await rpcCall("getMultipleAccounts",[keys,options],signal);
+  const [p,m,config,q]=result?.value??[];
+  if(!Number.isSafeInteger(result?.context?.slot)||result.context.slot<=0||p?.owner!==account.owner||!tokenPrograms.has(m?.owner)) throw new Error("Käyrän RPC-tilannekuva virheellinen");
+  const bytes=accountBytes(p), mint=accountBytes(m), fresh=decodePool(p.owner,bytes);
+  if(fresh.status!=="decoded"||!equal(fresh.base,token)||mint.length<82||mint[45]!==1) throw new Error("Käyrän tila muuttui");
+  if(!isDbc){
+    if(market.quoteToken!=="So11111111111111111111111111111111111111112") throw new Error("Moonit vastavaluutta virheellinen");
+    return {status:"approve",protocol:fresh.protocol,slot:result.context.slot,...curvePricing(fresh.protocol,bytes,mint[44])};
+  }
+  const cfg=accountBytes(config), qm=accountBytes(q);
+  if(config.owner!==p.owner||!equal(bytes.slice(72,104),publicKeyBytes(configKey))||cfg.length<40||!equal(cfg.subarray(0,8),[26,108,14,123,116,230,129,43])||!equal(cfg.slice(8,40),publicKeyBytes(market.quoteToken))||!tokenPrograms.has(q.owner)||qm.length<82||qm[45]!==1) throw new Error("DBC konfiguraatio virheellinen");
+  const v=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const sqrt=v.getBigUint64(280,true)+(v.getBigUint64(288,true)<<64n);
+  const spotRatio=(Number(sqrt)/2**64)**2*10**(mint[44]-qm[44]);
+  const baseAmount=Number(v.getBigUint64(232,true))/10**mint[44],quoteAmount=Number(v.getBigUint64(240,true))/10**qm[44];
+  if(!Number.isFinite(spotRatio)||spotRatio<=0||baseAmount<=0||quoteAmount<=0) throw new Error("DBC reservit virheelliset");
+  return {status:"approve",protocol:fresh.protocol,slot:result.context.slot,priceMode:"dbc_curve",spotRatio,baseAmount,quoteAmount};
 }
