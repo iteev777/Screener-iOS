@@ -2,7 +2,7 @@ import { rpcCall } from "./network.js";
 import { discoverWallets, publicKeyBytes, signDevnetProbe } from "./wallet-standard.js";
 
 export function createLiveAdapter(execution) {
-  const provider = globalThis.phantom?.solana;
+  const getProvider = () => globalThis.phantom?.solana;
   const wallets = discoverWallets();
   let standard;
   let walletChange;
@@ -18,6 +18,7 @@ export function createLiveAdapter(execution) {
       unsubscribe?.();
       unsubscribe = undefined;
       standard = undefined;
+      const provider=getProvider();
       const candidates = signingWallets();
       if (candidates.length === 1) {
         const selected = candidates[0];
@@ -34,7 +35,7 @@ export function createLiveAdapter(execution) {
         throw new Error("Käytä selaimessa yhtä Solana-lompakkoa kerrallaan.");
       }
       if (!provider?.isPhantom) {
-        throw new Error("Phantom-lompakkoa ei löytynyt tästä selaimesta.");
+        throw new Error("Phantom-lompakkoa ei löytynyt. Avaa sovellus Phantom-lompakon omassa selaimessa.");
       }
       const result = await provider.connect();
       const address = result.publicKey.toString();
@@ -43,10 +44,14 @@ export function createLiveAdapter(execution) {
     },
     onWalletChange(callback) {
       walletChange = callback;
-      provider?.on("accountChanged", callback);
-      provider?.on("disconnect", callback);
+      getProvider()?.on("accountChanged", callback);
+      getProvider()?.on("disconnect", callback);
     },
     canSign() { return Boolean(standard); },
+    phantomLink(url=globalThis.location?.href) {
+      const target=new URL(url);if(target.protocol!=="https:")throw new Error("HTTPS required");
+      return "https://phantom.app/ul/browse/"+encodeURIComponent(target.href)+"?ref="+encodeURIComponent(target.origin);
+    },
     signProbe(address, signal) { return signDevnetProbe(standard, address, signal); },
     async snapshot(address, signal) {
       const result = await rpcCall("getBalance", [address, { commitment: "confirmed" }], signal);
