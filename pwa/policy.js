@@ -1,7 +1,7 @@
 export const defaults = Object.freeze({
 mainOrderUsd: 5, mainStop: 9, mainProfit: 8, mainProfitShare: 50, mainFinalProfit: 10, mainTrailing: 3.5, mainBreakEven: 4, mainHoldMinutes: 15, mainDca: 0, mainDcaDrop: 5, sniperOrderUsd: 5, sniperStop: 9, sniperProfit: 8, sniperProfitShare: 50, sniperFinalProfit: 10, sniperTrailing: 3.5, sniperBreakEven: 4, sniperHoldMinutes: 15, sniperDca: 0, sniperDcaDrop: 5,
 
-  analysisWorkers: 24, maxMainPositions: 10, maxSniperPositions: 10, maxTotalPositions: 15, balanceFraction: 10, dcaDrop: 5,
+  analysisWorkers: 24, maxMainPositions: 10, maxSniperPositions: 10, maxTotalPositions: 15, balanceFraction: 10, dcaDrop: 3,
   strategy: 0, orderUsd: 100, exposureUsd: 200, lossUsd: 50, stop: 5, profit: 10, profitShare: 100, finalProfit: 20,
   trailing: 5, breakEven: 5, holdMinutes: 240, cooldownSeconds: 60,
   feeBps: 20, slippageBps: 15, dca: 0, interval: 30, minLiquidity: 10000, rugScore: 0, maxPools: 12, maxDailyBuys: 20, scanMinVolume: 10000
@@ -27,13 +27,13 @@ export function validateSettings(input) {
     settings[name] = value;
   }
   if (![settings.strategy, settings.dca, settings.maxPools, settings.maxDailyBuys, settings.analysisWorkers, settings.maxMainPositions, settings.maxSniperPositions, settings.maxTotalPositions].every(Number.isInteger) ||
-      settings.orderUsd > settings.exposureUsd ||
+      settings.orderUsd > settings.exposureUsd || (settings.dca && settings.dcaDrop >= settings.stop) ||
       (settings.profitShare < 100 && settings.finalProfit <= settings.profit)) {
     throw new Error("Tarkista strategia, lisäostot, enimmäispositio ja voittotavoitteiden järjestys.");
   }
   for (const p of ['main','sniper']) {
     const s = strategySettings(settings, p === 'main' ? 5 : 6);
-    if (!Number.isInteger(s.dca) || s.orderUsd > s.exposureUsd || (s.profitShare < 100 && s.finalProfit <= s.profit)) throw new Error('Virheelliset '+p+'-asetukset');
+    if (!Number.isInteger(s.dca) || (s.dca && s.dcaDrop >= s.stop) || s.orderUsd > s.exposureUsd || (s.profitShare < 100 && s.finalProfit <= s.profit)) throw new Error('Virheelliset '+p+'-asetukset');
   }
   return settings;
 }
