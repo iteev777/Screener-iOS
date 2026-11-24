@@ -12,6 +12,12 @@ const endpoints = [
   ["Community Takeovers", "/community-takeovers/latest/v1", 30000]
 ];
 
+function items(payload) {
+  if (Array.isArray(payload)) return payload;
+  const data = payload?.data;
+  if (Array.isArray(data)) return data;
+  return ["items","tokens","token_list","results"].map(k => data?.[k]).find(Array.isArray) ?? [];
+}
 export function sourcesFor(birdeyeKey) {
   const sources = endpoints.map(([name, path, interval]) => ({ name, interval, load: async signal => {
     const rows = await fetchJson(dex + path, {}, signal);
@@ -27,7 +33,7 @@ export function sourcesFor(birdeyeKey) {
     const options = { headers: { "X-API-KEY": birdeyeKey, "x-chain": "solana" } };
     let result;
     try {
-      result = await fetchJson(base + "/v3/token/list?sort_by=volume_24h_usd&sort_type=desc&offset=0&limit=30", options, signal);
+      result = await fetchJson(base + "/v3/token/list?sort_by=volume_24h_usd&sort_type=desc&offset=0&limit=100", options, signal);
     } catch (error) {
       if (![400, 404, 422].includes(error.status)) throw error;
       result = await fetchJson(base + "/token_trending?offset=0&limit=20", options, signal);
@@ -36,6 +42,28 @@ export function sourcesFor(birdeyeKey) {
     if (result?.success === false || !Array.isArray(rows)) throw new Error("Virheellinen Birdeye-syöte");
     return rows.map(row => row?.address);
   } });
+  const feed = (name, url, interval, mint, options = {}) => ({
+    name, interval, load: async signal => items(await fetchJson(url, options, signal))
+      .map(row => ({ token: mint(row), name: row?.name ?? row?.tokenMeta?.name,
+        symbol: row?.symbol ?? row?.tokenMeta?.symbol })).filter(row => address.test(row.token ?? ""))
+  });
+  for (const endpoint of ["new_tokens","recent","trending","verified"])
+    sources.push(feed("RugCheck " + endpoint, "https://api.rugcheck.xyz/v1/stats/" + endpoint, 45000, r => r?.mint ?? r?.address));
+  for (const endpoint of ["recent","toporganicscore/1h?limit=100","toptraded/1h?limit=100","toptrending/1h?limit=100"])
+    sources.push(feed("Jupiter " + endpoint, "https://lite-api.jup.ag/tokens/v2/" + endpoint, 30000, r => r?.id ?? r?.mint ?? r?.address));
+  sources.push(feed("CoinGecko", "https://api.coingecko.com/api/v3/coins/list?include_platform=true", 3600000, r => r?.platforms?.solana));
+  sources.push(feed("DeFiLlama", "https://api.llama.fi/protocols", 3600000, r =>
+    r?.chains?.some(c => String(c).toLowerCase() === "solana") ? r?.address?.replace(/^solana:/i,"") : null));
+  if (birdeyeKey) sources.push({name:"Birdeye Meme Listing", interval:30000, load: async signal => {
+    const options = {headers:{"X-API-KEY":birdeyeKey,"x-chain":"solana"}};
+    const base = "https://public-api.birdeye.so/defi";
+    let raw;
+    try { raw = await fetchJson(base + "/v2/tokens/new_listing?limit=20&meme_platform_enabled=true",options,signal); }
+    catch (e) { if (![400,404,422].includes(e.status)) throw e;
+      raw = await fetchJson(base + "/token_trending?sort_by=rank&sort_type=asc&interval=1h&limit=20",options,signal); }
+    if (raw?.success === false) throw new Error("Birdeye listing failure");
+    return items(raw).map(r => ({token:r.address ?? r.tokenAddress,name:r.name,symbol:r.symbol}));
+  }});
   return sources;
 }
 
@@ -63,6 +91,7 @@ export function watchPumpPortal(signal, emit, status) {
   let retry;
   let timer;
   let failures = 0;
+  const seen = new Set();
   function connect() {
     socket = new WebSocket("wss://pumpportal.fun/api/data");
     timer = setTimeout(() => socket.close(), 15000);
@@ -78,7 +107,10 @@ export function watchPumpPortal(signal, emit, status) {
         if (typeof row?.mint === "string" && address.test(row.mint) &&
             (row.txType === undefined || row.txType === "create")) {
           failures = 0;
-          emit(row.mint);
+          if (seen.has(row.mint)) return;
+          seen.add(row.mint);
+          if (seen.size > 10000) seen.delete(seen.values().next().value);
+          emit({token:row.mint,name:row.name,symbol:row.symbol,creator:row.traderPublicKey});
         }
       } catch { /* Ignore malformed feed frames. */ }
     };
@@ -103,10 +135,13 @@ export class CandidateQueue {
 
   add(tokens, source, now) {
     const discovered = [];
-    for (const token of new Set(tokens)) {
+    for (const value of tokens) {
+      const token = typeof value === "string" ? value : value?.token;
+      const metadata = typeof value === "object" && value ? {name:value.name,symbol:value.symbol,creator:value.creator} : {};
       if (typeof token !== "string" || !address.test(token)) continue;
       const item = this.items.get(token);
       if (item) {
+        for (const [key,val] of Object.entries(metadata)) if (val && !item[key]) item[key] = val;
         if (!item.sources.has(source)) {
           item.sources.add(source);
           item.due = Math.min(item.due, now);
@@ -114,11 +149,11 @@ export class CandidateQueue {
         if (source !== "PumpPortal") item.lastSeen = now;
         continue;
       }
-      if (this.items.size >= 600) {
+      if (this.items.size >= 1000) {
         this.stats.dropped++;
         continue;
       }
-      this.items.set(token, { token, sources: new Set([source]), due: now, seen: now, lastSeen: now, attempts: 0 });
+      this.items.set(token, { ...metadata, token, sources: new Set([source]), due: now, seen: now, lastSeen: now, attempts: 0 });
       this.stats.found++;
       discovered.push(token);
     }
@@ -131,7 +166,8 @@ export class CandidateQueue {
     }
     return [...this.items.values()].filter(item => item.due <= now && !item.inFlight)
       .sort((a, b) => Number(b.attempts === 0) - Number(a.attempts === 0) ||
-        (b.priority ?? 0) - (a.priority ?? 0) || a.due - b.due).slice(0, 30).map(item => { item.inFlight = true; return item; });
+        Number(b.sources.has("PumpPortal")) - Number(a.sources.has("PumpPortal")) ||
+        b.sources.size - a.sources.size || (b.priority ?? 0) - (a.priority ?? 0) || a.due - b.due).slice(0, 30).map(item => { item.inFlight = true; return item; });
   }
 
   finish(item, result, raw, now) {
