@@ -64,3 +64,5 @@ fieldset { min-width: 0; }
 .metric-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
 .metric-grid > div { padding:10px; background:#111726; border-radius:8px; min-width:0; }
 .metric-grid strong { font-size:clamp(1rem,5vw,1.5rem); }
+
+#token-chart { width:100%; height:auto; background:#111726; border-radius:8px; } #token-detail-data { overflow-wrap:anywhere; } #market-results li button { margin:3px; }
