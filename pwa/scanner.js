@@ -130,7 +130,7 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
         portfolio.lossToday = book.lossToday;
         portfolio.buyDay = book.buyDay;
         portfolio.buysToday = book.buysToday;
-        portfolio.trades.unshift({ ...book.trades[0], symbol: tick.symbol, token: tick.token, pool: tick.pool });
+        portfolio.trades.unshift({ ...book.trades[0], strategy: selectedStrategy, symbol: tick.symbol, token: tick.token, pool: tick.pool });
         portfolio.trades.length = Math.min(portfolio.trades.length, 200);
       }
       if (book.sol > 0) {
