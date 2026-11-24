@@ -124,3 +124,5 @@ jobs:
           bash pwa/package-static.sh "$RUNNER_TEMP/screener-pages"
           node --test pwa/*.test.mjs
           cmp LICENSE "$RUNNER_TEMP/screener-pages/LICENSE"
+
+# Run verification for the current development snapshot.
