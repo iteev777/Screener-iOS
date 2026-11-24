@@ -131,6 +131,8 @@ export function watchPumpPortal(signal, emit, status) {
 
 export class CandidateQueue {
   items = new Map();
+  sniperItems = new Map();
+  entries() { return [...this.items.values(), ...this.sniperItems.values()]; }
   stats = { found: 0, analyzed: 0, approved: 0, rejected: 0, dropped: 0 };
 
   add(tokens, source, now) {
@@ -139,21 +141,25 @@ export class CandidateQueue {
       const token = typeof value === "string" ? value : value?.token;
       const metadata = typeof value === "object" && value ? {name:value.name,symbol:value.symbol,creator:value.creator} : {};
       if (typeof token !== "string" || !address.test(token)) continue;
-      const item = this.items.get(token);
+      const item = this.sniperItems.get(token) ?? this.items.get(token);
       if (item) {
         for (const [key,val] of Object.entries(metadata)) if (val && !item[key]) item[key] = val;
         if (!item.sources.has(source)) {
           item.sources.add(source);
           item.due = Math.min(item.due, now);
         }
+        if (source === "PumpPortal" && this.items.has(token) && this.sniperItems.size < 1000) {
+          this.items.delete(token); this.sniperItems.set(token, item);
+        }
         if (source !== "PumpPortal") item.lastSeen = now;
         continue;
       }
-      if (this.items.size >= 1000) {
+      const target = source === "PumpPortal" ? this.sniperItems : this.items;
+      if (target.size >= 1000) {
         this.stats.dropped++;
         continue;
       }
-      this.items.set(token, { ...metadata, token, sources: new Set([source]), due: now, seen: now, lastSeen: now, attempts: 0 });
+      target.set(token, { ...metadata, token, sources: new Set([source]), due: now, seen: now, lastSeen: now, attempts: 0 });
       this.stats.found++;
       discovered.push(token);
     }
@@ -161,10 +167,11 @@ export class CandidateQueue {
   }
 
   take(now) {
-    for (const [mint, entry] of this.items) {
-      if (now - (entry.sources.size === 1 && entry.sources.has("PumpPortal") ? entry.seen : entry.lastSeen) >= 300000) this.items.delete(mint);
+    for (const map of [this.items, this.sniperItems]) for (const [mint, entry] of map) {
+      const sniper = entry.sources.size === 1 && entry.sources.has("PumpPortal");
+      if (!entry.inFlight && now - (sniper ? entry.seen : entry.lastSeen) >= (sniper ? 300000 : 600000)) map.delete(mint);
     }
-    return [...this.items.values()].filter(item => item.due <= now && !item.inFlight)
+    return this.entries().filter(item => item.due <= now && !item.inFlight)
       .sort((a, b) => Number(b.attempts === 0) - Number(a.attempts === 0) ||
         Number(b.sources.has("PumpPortal")) - Number(a.sources.has("PumpPortal")) ||
         b.sources.size - a.sources.size || (b.priority ?? 0) - (a.priority ?? 0) || a.due - b.due).slice(0, 30).map(item => { item.inFlight = true; return item; });
@@ -186,8 +193,8 @@ export class CandidateQueue {
   }
 
   snapshot(now) {
-    const entries = [...this.items.values()];
-    return { ...this.stats, queued: entries.filter(item => item.due <= now && !item.inFlight).length,
+    const entries = this.entries();
+    return { ...this.stats, mainQueue: this.items.size, sniperQueue: this.sniperItems.size, queued: entries.filter(item => item.due <= now && !item.inFlight).length,
       waiting: entries.filter(item => item.decision === "watch" && item.due > now).length };
   }
 }
