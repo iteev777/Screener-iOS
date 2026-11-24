@@ -1,5 +1,5 @@
 const cacheName = "screener-paper-v29";
-const files = ["./", "./app.js", "./live-adapter.js", "./network.js", "./wallet-standard.js", "./policy.js", "./markets.js", "./market-panel.js", "./rules.js", "./copy.js", "./jupiter.js", "./scanner.js", "./trojan-analysis.js", "./trojan-discovery.js", "./trojan-entry.js", "./trojan-pools.js", "./trojan-security.js", "./devnet.js", "./style.css", "./engine.wasm", "./manifest.webmanifest",
+const files = ["./", "./app.js", "./dashboard-nav.js", "./visual-rules.js", "./live-adapter.js", "./network.js", "./wallet-standard.js", "./policy.js", "./markets.js", "./market-panel.js", "./rules.js", "./copy.js", "./jupiter.js", "./scanner.js", "./trojan-analysis.js", "./trojan-discovery.js", "./trojan-entry.js", "./trojan-pools.js", "./trojan-security.js", "./devnet.js", "./style.css", "./engine.wasm", "./manifest.webmanifest",
   "./icon-192.png", "./icon-512.png", "./LICENSE"];
 
 self.addEventListener("install", event => {
