@@ -127,7 +127,7 @@ export async function verifyPoolReserves(market, signal) {
     if (global.length < 321 || !equal(global.subarray(0,8),[149,8,156,202,160,252,176,217])) throw new Error("PumpSwap global config virheellinen");
     pricing.feeBps = decodePumpFees(accountBytes(feeConfig));
   }
-  return { status:"approve", protocol:fresh.protocol, slot:snapshot.context.slot, base, quote, ...pricing };
+  return { status:"approve", protocol:fresh.protocol, slot:snapshot.context.slot, base, quote, ...pricing, range:concentratedRange(fresh.protocol,accountBytes(p)) };
 }
 
 export function poolPricing(protocol, bytes, base, quote) {
@@ -259,4 +259,31 @@ async function verifyPumpCurve(market,account,signal){
   const bytes=accountBytes(p),mint=accountBytes(m),fresh=decodePool(p.owner,bytes);
   if(fresh.status!=="decoded"||mint.length<82||mint[45]!==1||!equal(fresh.quote,publicKeyBytes(sol)))throw new Error("Pump.fun käyrä tai mintti virheellinen");
   return {status:"approve",protocol:fresh.protocol,slot:result.context.slot,...curvePricing(fresh.protocol,bytes,mint[44])};
+}
+
+/* Active price range metadata; not a multi-tick executable quote. */
+export function concentratedRange(protocol, bytes) {
+  const v=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  if(protocol==="Meteora DLMM"){
+    if(bytes.length<216)throw new Error("DLMM layout truncated");
+    const active=v.getInt32(76,true),step=v.getUint16(80,true);
+    if(!step)throw new Error("Invalid bin step");
+    const arrayIndex=Math.floor(active/70);
+    return {activeBin:active,binStep:step,arrayIndex,firstBin:arrayIndex*70,lastBin:arrayIndex*70+69};
+  }
+  if(protocol==="Orca Whirlpool"){
+    if(bytes.length<245)throw new Error("Whirlpool layout truncated");
+    const spacing=v.getUint16(41,true),tick=v.getInt32(81,true);
+    if(!spacing)throw new Error("Invalid tick spacing");
+    const width=88*spacing,start=Math.floor(tick/width)*width;
+    return {activeTick:tick,tickSpacing:spacing,arrayStart:start,arrayEnd:start+87*spacing};
+  }
+  if(protocol==="Raydium CLMM"){
+    if(bytes.length<273)throw new Error("CLMM layout truncated");
+    const spacing=v.getUint16(235,true),tick=v.getInt32(269,true);
+    if(!spacing)throw new Error("Invalid tick spacing");
+    const width=60*spacing,start=Math.floor(tick/width)*width;
+    return {activeTick:tick,tickSpacing:spacing,arrayStart:start,arrayEnd:start+59*spacing};
+  }
+  return null;
 }
