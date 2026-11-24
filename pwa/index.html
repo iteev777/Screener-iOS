@@ -32,7 +32,7 @@
 </div>
 <p id="status" role="status">Ladataan WebAssembly-moottoria…</p>
 </section>
-<div class="overview" data-page="home">
+<section data-page="home"><h2>Paper Trading · Portfolio</h2><div class="metric-grid"><div><p>Salkun arvo</p><strong id="home-equity">—</strong></div><div><p>Käteinen</p><strong id="home-cash">—</strong></div><div><p>Toteutunut P/L</p><strong id="home-pnl">—</strong></div><div><p>Avoimet positiot</p><strong id="home-count">—</strong></div></div></section><div class="overview" data-page="home">
 <section aria-label="Markkina"><h2 id="market-title">SOL / USD</h2><strong id="price">—</strong><p id="source">Valitse hintalähde.</p><p>Solana WebSocket · slot <span id="slot">—</span></p></section>
 <section aria-label="Salkku"><h2 id="book-title">Paperisalkku</h2><strong id="equity">—</strong><p id="balance"></p><p id="position"></p></section>
 </div>
@@ -60,8 +60,7 @@
 <label>Simulaation julkinen Solana-osoite (valinnainen)<input id="trojan-taker" autocomplete="off" maxlength="44"></label>
 <details><summary>Tokenien analyysiloki</summary><ol id="scan-events"></ol></details><p id="scan-balance"></p>
 <h2>Seuratut markkinat</h2><ul id="scan-markets"></ul>
-<h2>Avoimet skannauspositiot</h2><ul id="scan-positions"></ul>
-<h2>Skannauksen kaupat</h2><ol id="scan-trades"></ol></details>
+</details><section data-page="positions"><h2>Avoimet skannauspositiot</h2><ul id="scan-positions"></ul><h2>Skannauksen kaupat</h2><ol id="scan-trades"></ol></section>
 <section data-page="positions"><h2 id="trades-title">Simuloidut kaupat</h2><p id="stats"></p><ol id="trades"></ol><p id="empty">Ei tapahtumia.</p></section>
 <details data-page="settings"><summary>Strategia ja riskirajat</summary>
 <form id="settings">
