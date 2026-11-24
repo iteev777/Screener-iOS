@@ -129,24 +129,29 @@ export class CandidateQueue {
     for (const [mint, entry] of this.items) {
       if (now - (entry.sources.size === 1 && entry.sources.has("PumpPortal") ? entry.seen : entry.lastSeen) >= 300000) this.items.delete(mint);
     }
-    return [...this.items.values()].filter(item => item.due <= now)
+    return [...this.items.values()].filter(item => item.due <= now && !item.inFlight)
       .sort((a, b) => Number(b.attempts === 0) - Number(a.attempts === 0) ||
-        (b.priority ?? 0) - (a.priority ?? 0) || a.due - b.due).slice(0, 30);
+        (b.priority ?? 0) - (a.priority ?? 0) || a.due - b.due).slice(0, 30).map(item => { item.inFlight = true; return item; });
   }
 
   finish(item, result, raw, now) {
+    item.inFlight = false;
     if (!item.attempts) this.stats.analyzed++;
     if (result === "approve" && !item.approved) { this.stats.approved++; item.approved = true; }
     if (result === "reject" && !item.rejected) { this.stats.rejected++; item.rejected = true; }
     item.decision = result;
     item.attempts++;
     item.priority = raw ? candidateQuality(raw, item.sources, now).score : 0;
-    item.due = now + (result === "watch" && item.attempts < 3 ? 10000 : result === "approve" ? 15000 : 60000);
+    item.due = now + (result === "watch" ? 10000 : result === "approve" ? 15000 : 60000);
+  }
+
+  release(batch, now) {
+    for (const item of batch) if (item.inFlight) { item.inFlight = false; item.due = now + 3000; }
   }
 
   snapshot(now) {
     const entries = [...this.items.values()];
-    return { ...this.stats, queued: entries.filter(item => item.due <= now).length,
+    return { ...this.stats, queued: entries.filter(item => item.due <= now && !item.inFlight).length,
       waiting: entries.filter(item => item.decision === "watch" && item.due > now).length };
   }
 }
