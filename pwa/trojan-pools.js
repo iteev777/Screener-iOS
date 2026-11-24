@@ -62,6 +62,7 @@ export async function verifyPools(rows, signal) {
     const market = rows[i];
     const base = publicKeyBytes(market.token);
     const quote = typeof market.quoteToken === "string" ? publicKeyBytes(market.quoteToken) : null;
+    if (decoded.protocol === "Pump.fun") return {status:"approve",protocol:decoded.protocol,reason:"PDA tarkistetaan syväanalyysissä"};
     if (decoded.protocol === "Moonit" || decoded.protocol === "Meteora DBC") {
       return { status: decoded.base && equal(decoded.base,base) ? "approve" : "reject", protocol:decoded.protocol, reason:"Mintin alustava tarkistus; konfiguraatio tarkistetaan seuraavaksi" };
     }
@@ -101,6 +102,7 @@ export async function verifyPoolReserves(market, signal) {
   const first = await rpcCall("getMultipleAccounts", [[market.pool], options], signal);
   const account = first?.value?.[0];
   const decoded = decodePool(account?.owner, accountBytes(account));
+  if (decoded.status === "decoded" && decoded.protocol === "Pump.fun") return verifyPumpCurve(market,account,signal);
   if (decoded.status === "decoded" && ["Moonit","Meteora DBC"].includes(decoded.protocol)) return verifySpecialPool(market, account, decoded, signal);
   if (decoded.status !== "decoded" || !decoded.baseVault || !decoded.quoteVault || !decoded.base || !decoded.quote) return { status:"watch", reason:"Reservirakenne ei ole tuettu" };
   const keys = [decoded.baseVault, decoded.quoteVault, decoded.base, decoded.quote].map(encodeKey);
@@ -228,4 +230,33 @@ async function verifySpecialPool(market, account, decoded, signal) {
   const baseAmount=Number(v.getBigUint64(232,true))/10**mint[44],quoteAmount=Number(v.getBigUint64(240,true))/10**qm[44];
   if(!Number.isFinite(spotRatio)||spotRatio<=0||baseAmount<=0||quoteAmount<=0) throw new Error("DBC reservit virheelliset");
   return {status:"approve",protocol:fresh.protocol,slot:result.context.slot,priceMode:"dbc_curve",spotRatio,baseAmount,quoteAmount};
+}
+
+const fieldP=(1n<<255n)-19n;
+const mod=x=>((x%fieldP)+fieldP)%fieldP;
+function powMod(x,n){let r=1n;for(x=mod(x);n;n>>=1n,x=mod(x*x))if(n&1n)r=mod(r*x);return r;}
+function onCurve(bytes){
+  let y=0n;for(let i=31;i>=0;i--)y=(y<<8n)+BigInt(i===31?bytes[i]&127:bytes[i]);
+  if(y>=fieldP)return false;
+  const yy=mod(y*y),d=mod(-121665n*powMod(121666n,fieldP-2n)),den=mod(d*yy+1n);
+  if(!den)return false;
+  const x2=mod((yy-1n)*powMod(den,fieldP-2n));
+  return x2===0n ? !(bytes[31]&128) : powMod(x2,(fieldP-1n)/2n)===1n;
+}
+export async function pumpCurveAddress(mint,program){
+  const seed=new TextEncoder().encode("bonding-curve"),suffix=new TextEncoder().encode("ProgramDerivedAddress");
+  const data=new Uint8Array(seed.length+32+1+32+suffix.length);
+  data.set(seed);data.set(publicKeyBytes(mint),seed.length);data.set(publicKeyBytes(program),seed.length+33);data.set(suffix,seed.length+65);
+  for(let bump=255;bump>=0;bump--){data[seed.length+32]=bump;const hash=new Uint8Array(await crypto.subtle.digest("SHA-256",data));if(!onCurve(hash))return encodeKey(hash);}
+  throw new Error("Pump.fun PDA puuttuu");
+}
+async function verifyPumpCurve(market,account,signal){
+  const sol="So11111111111111111111111111111111111111112";
+  if(market.quoteToken!==sol||await pumpCurveAddress(market.token,account.owner)!==market.pool)throw new Error("Pump.fun PDA tai vastavaluutta ei täsmää");
+  const result=await rpcCall("getMultipleAccounts",[[market.pool,market.token],{commitment:"confirmed",encoding:"base64"}],signal);
+  const [p,m]=result?.value??[];
+  if(p?.owner!==account.owner||!tokenPrograms.has(m?.owner)||!Number.isSafeInteger(result?.context?.slot)||result.context.slot<=0)throw new Error("Pump.fun snapshot virheellinen");
+  const bytes=accountBytes(p),mint=accountBytes(m),fresh=decodePool(p.owner,bytes);
+  if(fresh.status!=="decoded"||mint.length<82||mint[45]!==1||!equal(fresh.quote,publicKeyBytes(sol)))throw new Error("Pump.fun käyrä tai mintti virheellinen");
+  return {status:"approve",protocol:fresh.protocol,slot:result.context.slot,...curvePricing(fresh.protocol,bytes,mint[44])};
 }
