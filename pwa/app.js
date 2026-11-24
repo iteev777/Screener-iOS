@@ -270,6 +270,14 @@ async function startScan() {
   const policy = settings;
   const birdeyeKey = byId("birdeye-key").value.trim();
   byId("birdeye-key").value = "";
+  const jupiterKey = byId("trojan-jupiter-key").value.trim();
+  byId("trojan-jupiter-key").value = "";
+  const simulationWallet = byId("trojan-taker").value.trim();
+  if (simulationWallet && !solanaAddress.test(simulationWallet)) {
+    byId("scan-status").textContent = "Anna kelvollinen julkinen Solana-osoite.";
+    return;
+  }
+  byId("scan-events").replaceChildren();
   if ((policy.strategy === 4 && !copyWallets.length) || (policy.strategy === 3 && !rules)) {
     byId("scan-status").textContent = "Tallenna ehtopuu tai Copy Trading -lompakko valitulle strategialle.";
     return;
@@ -284,7 +292,15 @@ async function startScan() {
   try {
     const load = async () => await stored(scanKey) ?? newPortfolio();
     await runScanner({ engine, policy, rules: policy.strategy === 3 ? rules : null, timeframe,
-      copyWallets: policy.strategy === 4 ? copyWallets : null, birdeyeKey, signal: controller.signal, load,
+      copyWallets: policy.strategy === 4 ? copyWallets : null, birdeyeKey, jupiterKey, simulationWallet, signal: controller.signal, load,
+      event(entry) {
+        const row = document.createElement("li");
+        const label = { found: "Löytyi", approve: "Hyväksytty", watch: "Odottaa", reject: "Hylätty" }[entry.status];
+        row.textContent = `${new Date(entry.at).toLocaleTimeString("fi-FI")} · ${label} · ${entry.mint}${entry.score == null ? "" : ` · strategia ${entry.score}/100`}${entry.quality == null ? "" : ` · laatu ${entry.quality}/100`} · ${entry.reason}`;
+        const list = byId("scan-events");
+        list.prepend(row);
+        if (list.children.length > 60) list.lastElementChild.remove();
+      },
       commit: (ticks, decide, eligible) => commitScan(ticks, decide, eligible, policy, controller.signal),
       telemetry(stats) {
         byId("scan-counts").textContent = `Löydetyt ${stats.found} · Analysoidut ${stats.analyzed} · Hylätyt ${stats.rejected} · Hyväksytyt ${stats.approved}`;

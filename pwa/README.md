@@ -72,3 +72,13 @@ Valitse strategia riskiasetuksista ja paina **Käynnistä Paper-skannaus**. Main
 Löytöjono käsittelee enintään 600 aktiivista minttiä ja analyysi enintään 30 minttiä per erä. Dashboardin pooliraja vaikuttaa kaupankäyntiseurantaan. Lähteet päivittyvät 15–60 sekunnin välein ja avoimien positioiden hinnat normaalisti noin kolmessa sekunnissa. Puuttuvien tietojen ensimmäiset uudelleenhaut odottavat 10 sekuntia. Analyysitilastot ovat ajokohtaisia. Birdeyen avain on valinnainen ja säilyy vain ajon muistissa.
 
 Mainin ja Sniperin selainportti käyttää alkuperäisiä pisteytysrajoja ja yhden aikavälin teknistä vahvistusta, kun kelvollista OHLCV-dataa on saatavilla. Alkuperäisen Trojan V2:n Jupiter-ostoanalyysi, ketjukohtaiset poolidekooderit, koko RugCheck-raportin haltija- ja LP-analyysi, moniaikavälisuodatus ja natiivi Live-toteutus jäivät selainportin ulkopuolelle. Nykyiset Screenerin Paper-simulaatio, poistumissäännöt ja riskirajat ovat käytössä.
+
+#### Trojanin osto- ja turvallisuusanalyysi
+
+Main ja Sniper lukevat RugCheckin täydestä raportista omistajakeskittymän, tekijäosuuden, sisäpiirilinkit, LP-lukituksen ja markkinalikviditeetin. Tunnetuille Solana-ohjelmille tarkistetaan poolitilin omistaja, rakenne, tila ja tokenpari ennen Jupiter v2 -tarjousta. Puuttuvaa tai ristiriitaista turvallisuustietoa ei hyväksytä. Analyysiloki näyttää tilan, pisteet ja syyn enintään 60 tuoreimmalle merkinnälle.
+
+Jupiter tarkistaa WSOL-määrän, reittipisteet, hintavaikutuksen ja liukuman. Valinnainen julkinen simulaatio-osoite ottaa käyttöön allekirjoittamattoman RPC-simulaation sekä tarjousten tuottovertailun. Avain ja osoite ovat ajoasetuksia. Paper-osto rajataan enintään 5 dollariin, enintään 10 prosenttiin käytettävästä kassasta ja vähintään yhteen dollariin. Nykyinen tiukempi Screener-raja säilyy ensisijaisena.
+
+Tekninen vahvistus käyttää 1 min kynttilöitä ja niistä muodostettuja kokonaisia 3 min, 5 min, 15 min, 30 min, 1 h ja 4 h jaksoja. Vajaat tai historiattomat aikavälit eivät anna ääntä. Enintään 480 yhden minuutin kynttilää rajoittaa sitä, kuinka monta pidempää aikaväliä voi lämmetä samasta historiasta.
+
+Selainportti ei kata Trojanin kaikkia ympäristömuuttujilla ohjattuja sääntöjä, kaikkia protokollakohtaisia holvi-, tick-, bin- ja maksulaskelmia, natiivia poolireititystä eikä Live-lähetystä. Poolit, joiden tokenparia ei voi varmistaa tilin asettelusta, jäävät odottamaan. Julkaistun iPhone-selaimen verkkotesti on edelleen avoin.

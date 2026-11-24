@@ -67,3 +67,9 @@ Tämän kierroksen 20 JavaScript-testiä, 11 Rust-testiä, alkuperäisen kirjast
 - Selainpuun `maCross` käyttää yhteisiä Rustin EMA- ja SMA-laskuja. Nopean ja hitaan jakson, risteyksen suunnan ja katseluikkunan voi määrittää JSON-ehtopuussa. Alkuperäisen ehtopuulomakkeen suora tuonti on avoinna.
 - Pages-työnkulku rakentaa manuaalisesti testatun staattisen artefaktin oletushaaralta, kun jakeluoikeudet on kuitattu. Ulkoista julkaisua ei tässä ajossa tehty. [Käyttöohje](README.md) kuvaa iPhonen kotinäyttöasennuksen.
 - Devnet-faucetin tilanne on avoin. Käytä iPhonen näkymän kopiointipainikkeen antamaa julkista osoitetta ja pidä luonut sivu auki. Käyttäjän laitteella luotua yksityistä avainta ei viedä, eikä osoitetta voi määritellä etukäteen.
+
+## Trojan V2:n Solana-ostoanalyysi
+
+Trojan-profiilit käyttävät täyttä RugCheck-raporttia, minttitarkistusta, yhteensopivan Solana-poolin tilitarkistusta sekä Jupiter v2:n WSOL-tarjousta. Poolilukija tuntee 11 ohjelman asettelut. Se vahvistaa tuetun tilin omistajan, diskriminaattorin, tilan ja tokenparin. Se ei laske kaikkien protokollien natiiveja toteutushintoja holvi-, tick-, bin- ja fee-tileistä. Käyttäjän julkinen osoite mahdollistaa valinnaisen allekirjoittamattoman simulaation. Koodipolku ei allekirjoita eikä lähetä.
+
+Oikea PumpPortal-yhteys toimitti uuden mintin subscribeNewToken-tilauksella. Main-profiilin 40 sekunnin Node-ajossa löytyi ja analysoitiin 113 minttiä. Hylkäyksiä oli 10 ja odottavia 103. Ajo ei avannut kauppaa. Jupiter v2:n oikea WSOL/USDC-tarjous hyväksyttiin pistemäärällä 94,82. Neljän ohjelmatyypin tilit ja mintit varmistuivat 12 aidossa poolissa 14 tarkistetusta tilistä. Oikealla datalla ajettu simulaation onnistumispolku, ulkoiset Safari-yhteydet ja täydellinen Trojan-pariteetti ovat avoinna. Selaimen Paper-ostot ja riskimyynnit todennettiin mallivastauksilla.

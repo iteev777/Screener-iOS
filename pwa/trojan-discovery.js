@@ -102,6 +102,7 @@ export class CandidateQueue {
   stats = { found: 0, analyzed: 0, approved: 0, rejected: 0, dropped: 0 };
 
   add(tokens, source, now) {
+    const discovered = [];
     for (const token of new Set(tokens)) {
       if (typeof token !== "string" || !address.test(token)) continue;
       const item = this.items.get(token);
@@ -119,7 +120,9 @@ export class CandidateQueue {
       }
       this.items.set(token, { token, sources: new Set([source]), due: now, seen: now, lastSeen: now, attempts: 0 });
       this.stats.found++;
+      discovered.push(token);
     }
+    return discovered;
   }
 
   take(now) {

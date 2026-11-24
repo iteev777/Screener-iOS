@@ -13,7 +13,7 @@ export function normalizePair(pair) {
   const price = Number(pair.priceUsd);
   const liquidity = pair.liquidity?.usd;
   if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(liquidity) || liquidity <= 0) return;
-  return { token: pair.baseToken.address, pool: pair.pairAddress,
+  return { token: pair.baseToken.address, pool: pair.pairAddress, quoteToken: pair.quoteToken?.address,
     symbol: String(pair.baseToken.symbol ?? "").slice(0, 18), price, liquidity,
     volume: pair.volume?.h24, change: pair.priceChange?.h24, transactions: pair.txns, created: pair.pairCreatedAt };
 }
@@ -107,6 +107,13 @@ async function loadCandles(selection, unit, aggregate, limit, signal) {
   const query = new URLSearchParams({ aggregate, limit, currency: "usd", token: selection.token });
   const response = await fetchJson(`${gecko}/networks/solana/pools/${selection.pool}/ohlcv/${unit}?${query}`, {}, signal);
   return normalizeCandles(response?.data?.attributes?.ohlcv_list, limit);
+}
+
+export async function fetchTrojanCandles(selection, signal) {
+  if (!address.test(selection?.pool ?? "") || !address.test(selection?.token ?? "")) {
+    throw new Error("Virheellinen OHLCV-markkina");
+  }
+  return loadCandles(selection, "minute", 1, 480, signal);
 }
 
 export async function fetchCandles(selection, timeframe, signal) {

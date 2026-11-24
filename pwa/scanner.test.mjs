@@ -97,3 +97,15 @@ test("daily purchase allowance is shared across pools and resets at UTC midnight
   run(book, [tick("C", 100, 86401000)], limited);
   assert.deepEqual(Object.keys(book.positions), ["C:C"]);
 });
+
+test("Trojan paper entries cap order notional to five dollars and 10% of available cash", () => {
+  const book = newPortfolio();
+  book.cash = 20;
+  const settings = { ...policy, strategy: 5 };
+  run(book, [tick("A")], settings);
+  assert.equal(book.positions["A:A"].cost, 2);
+  const low = newPortfolio();
+  low.cash = 9;
+  run(low, [tick("B")], settings);
+  assert.deepEqual(Object.keys(low.positions), []);
+});
