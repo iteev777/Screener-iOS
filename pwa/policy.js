@@ -153,6 +153,14 @@ export function paperExecutionCost(book,order,tick,settings){
   const reserve=Number(tick.liquidity)/2;
   const impact=Number.isFinite(reserve)&&reserve>0?notional/(reserve+notional):0.5;
   const route=buy&&Number.isFinite(tick.entryImpactPct)?Math.max(0,tick.entryImpactPct/100):0;
-  const slip=Math.min(.99,Math.max(baseline,impact,route));
-  return {slip,fee,impact,source:"liquidity_proxy"};
+  let depth=0,source="liquidity_proxy";
+  const pool=tick.sellPool;
+  if(!buy&&pool?.status==="approve"&&pool.expires>=Date.now()&&pool.priceMode==="reserves"&&["Raydium CPMM","Raydium AMM v4","FluxBeam"].includes(pool.protocol)){
+    const base=pool.baseMint===tick.token, valid=base||pool.quoteMint===tick.token;
+    const reserveRaw=Number(base?pool.effectiveBaseRaw:pool.effectiveQuoteRaw), decimals=base?pool.base?.decimals:pool.quote?.decimals;
+    const reserveTokens=reserveRaw/10**decimals, sold=Math.min(order.sol,book.sol);
+    if(valid&&Number.isFinite(reserveTokens)&&reserveTokens>0&&Number.isFinite(pool.feeBps)){depth=sold/(reserveTokens+sold);source="verified_reserve_proxy";}
+  }
+  const slip=Math.min(.99,Math.max(baseline,impact,route,depth));
+  return {slip,fee:Math.max(fee,source==="verified_reserve_proxy"?pool.feeBps/10000:0),impact:Math.max(impact,depth),source};
 }
