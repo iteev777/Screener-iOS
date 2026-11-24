@@ -280,14 +280,14 @@ export function concentratedRange(protocol, bytes) {
     const spacing=v.getUint16(41,true),tick=v.getInt32(81,true);
     if(!spacing)throw new Error("Invalid tick spacing");
     const width=88*spacing,start=Math.floor(tick/width)*width;
-    return {activeTick:tick,tickSpacing:spacing,arrayStart:start,arrayEnd:start+87*spacing};
+    return {activeTick:tick,tickSpacing:spacing,arrayStart:start,arrayEnd:start+87*spacing,liquidityRaw:readU128(v,49).toString(),sqrtPriceX64:readU128(v,65).toString()};
   }
   if(protocol==="Raydium CLMM"){
     if(bytes.length<273)throw new Error("CLMM layout truncated");
     const spacing=v.getUint16(235,true),tick=v.getInt32(269,true);
     if(!spacing)throw new Error("Invalid tick spacing");
     const width=60*spacing,start=Math.floor(tick/width)*width;
-    return {activeTick:tick,tickSpacing:spacing,arrayStart:start,arrayEnd:start+59*spacing};
+    return {activeTick:tick,tickSpacing:spacing,arrayStart:start,arrayEnd:start+59*spacing,liquidityRaw:readU128(v,237).toString(),sqrtPriceX64:readU128(v,253).toString()};
   }
   return null;
 }
@@ -394,4 +394,44 @@ export function estimateBinSwap(snapshot,inputRaw,swapXForY,feeBps){
   }
   const spent=input-remaining;
   return {complete:remaining===0n&&out>0n,inputRaw:input.toString(),spentRaw:spent.toString(),outputRaw:out.toString(),unfilledRaw:remaining.toString(),feeRaw:fees.toString(),binsCrossed:bins,indicative:true};
+}
+
+function readU128(v,o){return v.getBigUint64(o,true)+(v.getBigUint64(o+8,true)<<64n);}
+export function estimateTickSwap(snapshot,inputRaw,swapXForY,feeBps){
+  if(!["Raydium CLMM","Orca Whirlpool"].includes(snapshot.protocol)||!snapshot.range||!Array.isArray(snapshot.arrays))throw new Error("CLMM snapshot required");
+  if(!Number.isInteger(feeBps)||feeBps<0||feeBps>=10000)throw new Error("Verified fee bound required");
+  const Q=1n<<64n,den=10000n,rate=den-BigInt(feeBps),ceil=(a,b)=>(a+b-1n)/b;
+  const input=BigInt(inputRaw),r=snapshot.range;
+  let remaining=input,out=0n,fees=0n,L=BigInt(r.liquidityRaw),s=BigInt(r.sqrtPriceX64),crossed=0;
+  if(input<=0n||L<=0n||s<=0n)throw new Error("Invalid swap state");
+  const width=(snapshot.protocol==="Orca Whirlpool"?88:60)*r.tickSpacing;
+  const arrays=new Map(snapshot.arrays.filter(a=>a.status==="verified").map(a=>[a.index,a]));
+  const levels=[];
+  let boundary=r.arrayStart;
+  for(let j=0;j<3;j++){
+    const start=r.arrayStart+(swapXForY?-j:j)*width,a=arrays.get(start);
+    if(!a)break;
+    levels.push(...a.levels.filter(l=>swapXForY?l.tick<=r.activeTick:l.tick>r.activeTick));
+    boundary=swapXForY?start:start+width;
+  }
+  if(!arrays.has(r.arrayStart))return {complete:false,outputRaw:"0",unfilledRaw:input.toString(),indicative:true};
+  levels.sort((a,b)=>swapXForY?b.tick-a.tick:a.tick-b.tick);
+  levels.push({tick:boundary,liquidityNet:"0"});
+  for(const level of levels){
+    if(!remaining||L<=0n)break;
+    if(Math.abs(level.tick)>443636)break;
+    const t=BigInt(Math.floor(Math.pow(1.0001,level.tick/2)*Number(Q)));
+    if(t<=0n||(swapXForY?t>s:t<s))continue;
+    const delta=swapXForY?s-t:t-s;
+    const need=swapXForY?ceil(L*Q*delta,s*t):ceil(L*delta,Q);
+    const grossNeed=ceil(need*den,rate);
+    const gross=remaining<grossNeed?remaining:grossNeed,net=gross*rate/den;
+    const reached=gross>=grossNeed;
+    const next=reached?t:swapXForY?ceil(L*Q*s,L*Q+net*s):s+net*Q/L;
+    const received=swapXForY?L*(s-next)/Q:L*Q*(next-s)/(next*s);
+    out+=received;remaining-=gross;fees+=gross-net;s=next;
+    if(!reached)break;
+    L+=BigInt(level.liquidityNet)*(swapXForY?-1n:1n);crossed++;
+  }
+  return {complete:remaining===0n&&out>0n,inputRaw:input.toString(),outputRaw:out.toString(),unfilledRaw:remaining.toString(),feeRaw:fees.toString(),ticksCrossed:crossed,indicative:true};
 }
