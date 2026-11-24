@@ -210,6 +210,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   let pump = "yhdistetään";
   let sourceError = "";
   let processing = 0;
+  let routeBusy = false;
   let candleIndex = 0;
   const candles = new Map();
   let approvedTicks = [];
@@ -251,12 +252,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
       const started = Date.now();
       const batch = queue.take(started);
       if (!batch.length) {
-        processing = 0;
         show();
-        await pause(1000, signal);
+        await pause(500, signal);
         continue;
       }
-      processing = batch.length;
+      processing += batch.length;
       show();
       try {
         const markets = await marketBatch(batch.map(item => item.token), signal);
@@ -302,11 +302,12 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           }));
         }
         if (signal.aborted) return;
-        if (policy.strategy >= 5 && Date.now() >= nextJupiter) {
+        if (policy.strategy >= 5 && !routeBusy && Date.now() >= nextJupiter) {
           const next = possible.find(({ item, pair }) => mintCache.get(item.token)?.ok &&
             rugCache.get(item.token)?.ok && !routeCache.has(positionKey(pair.market)));
           if (next) {
             const market = next.pair.market;
+            routeBusy = true;
             try {
               const [pool] = await verifyPools([market], signal);
               if (pool.status !== "approve") {
@@ -325,6 +326,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
               routeCache.set(positionKey(market), { status: "watch", reason: error.message, expires: Date.now() + 15000 });
             } finally {
               nextJupiter = Date.now() + 2050;
+              routeBusy = false;
             }
           }
         }
@@ -364,10 +366,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         if (!signal.aborted) sourceError = `Analyysihaku: ${error.message}`;
         failures++;
       } finally {
-        processing = 0;
+        queue.release(batch, Date.now());
+        processing -= batch.length;
         show();
       }
-      await pause(failures ? Math.min(60000, 3000 * 2 ** Math.min(failures, 5)) : 2000, signal);
+      await pause(failures ? Math.min(60000, 3000 * 2 ** Math.min(failures, 5)) : 500, signal);
     }
   }
 
@@ -505,5 +508,5 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
     }
   }
 
-  await Promise.all([discover(), analyze(), enrich(), positions()]);
+  await Promise.all([discover(), analyze(), analyze(), enrich(), positions()]);
 }
