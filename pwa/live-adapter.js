@@ -63,3 +63,15 @@ export function createLiveAdapter(execution) {
     }
   };
 }
+
+/* Read-only reconciliation: an unknown signature is not a failed trade. */
+export async function reconcileLiveSignature(signature,signal){
+  if(typeof signature!=="string"||!/^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(signature))throw new Error("Virheellinen transaktiotunniste");
+  const result=await rpcCall("getSignatureStatuses",[[signature],{searchTransactionHistory:true}],signal);
+  if(!Array.isArray(result?.value)||result.value.length!==1)throw new Error("Virheellinen vahvistusvastaus");
+  const status=result.value[0];
+  if(!status)return {signature,state:"unknown"};
+  if(status.err!=null)return {signature,state:"failed",error:status.err};
+  if(["confirmed","finalized"].includes(status.confirmationStatus))return {signature,state:"confirmed",slot:status.slot};
+  return {signature,state:"pending",slot:status.slot};
+}
