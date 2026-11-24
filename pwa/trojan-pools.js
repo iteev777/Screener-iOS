@@ -140,6 +140,7 @@ export async function verifyPoolReserves(market, signal) {
     if (global.length < 321 || !equal(global.subarray(0,8),[149,8,156,202,160,252,176,217])) throw new Error("PumpSwap global config virheellinen");
     pricing.feeBps = decodePumpFees(accountBytes(feeConfig));
   }
+  if(fresh.protocol==="Meteora DLMM") Object.assign(pricing,decodeDlmmFeeBound(accountBytes(p)));
   const currentRange=concentratedRange(fresh.protocol,accountBytes(p));
   const arrays=range ? await inspectArrays(fresh.protocol,market.pool,p.owner,currentRange,range,snapshot.value.slice(5+feeKeys.length),arrayKeys) : null;
   return { status:"approve", protocol:fresh.protocol, slot:snapshot.context.slot, base, quote, ...pricing, range:currentRange, arrays };
@@ -459,4 +460,24 @@ export function decodeConcentratedFee(protocol,raw){
   }else throw new Error("Unsupported fee layout");
   if(rate>=1000000)throw new Error("Invalid trade fee");
   return Math.ceil(rate/100);
+}
+
+/* Conservative fee ceiling for the supported DLMM static parameter layout.
+   The actual variable fee changes as bins are crossed. */
+export function decodeDlmmFeeBound(raw){
+  if(raw.length<216)throw new Error("DLMM fee layout truncated");
+  const v=new DataView(raw.buffer,raw.byteOffset,raw.byteLength);
+  const baseFactor=BigInt(v.getUint16(8,true));
+  const control=BigInt(v.getUint32(16,true));
+  const maxVolatility=BigInt(v.getUint32(20,true));
+  const step=BigInt(v.getUint16(80,true));
+  const power=raw[34];
+  if(!step||power>9)throw new Error("DLMM fee parameters unsupported");
+  const precision=1000000000n;
+  const base=baseFactor*step*10n*10n**BigInt(power);
+  const variable=(control*(maxVolatility*step)**2n+99999999999n)/100000000000n;
+  const total=base+variable;
+  const cap=100000000n;
+  const bound=total<cap?total:cap;
+  return {feeBps:Number((bound*10000n+precision-1n)/precision),feeMode:"dlmm_conservative_ceiling",baseFeeRate:base.toString(),variableFeeCeiling:variable.toString()};
 }
