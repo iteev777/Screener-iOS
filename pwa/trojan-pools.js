@@ -14,10 +14,19 @@ const layouts = new Map([
   ["cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG", ["Meteora DAMM v2", 488, pool, [168, 200, 232, 264]]],
   ["dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN", ["Meteora DBC", 306, [213, 224, 5, 209, 98, 69, 119, 92], [136, null, 168, 200]]],
   ["FLUXubRmkEi2q6K3Y9kBPg9248ggaZVsoSFhtJHSrm1X", ["FluxBeam", 324, null, [131, 163, 35, 67]]],
-  ["6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", ["Pump.fun", 125, [23, 183, 248, 55, 96, 216, 172, 96], [null, 83]]],
+  ["6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", ["Pump.fun", 49, [23, 183, 248, 55, 96, 216, 172, 96], [null, 83]]],
   ["MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG", ["Moonit", 82, [8, 91, 83, 28, 132, 216, 248, 22], [24]]]
 ]);
 const equal = (a, b) => a.length === b.length && a.every((value, i) => value === b[i]);
+const wsol = "So11111111111111111111111111111111111111112";
+const usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+export function pumpQuoteMint(bytes) {
+  if (bytes.length < 49 || bytes.length > 83 && bytes.length < 115) return;
+  const key = bytes.subarray(83,115);
+  if (!key.some(Boolean) || equal(key,publicKeyBytes(wsol))) return wsol;
+  if (equal(key,publicKeyBytes(usdc))) return usdc;
+}
 
 export function decodePool(owner, bytes) {
   const layout = layouts.get(owner);
@@ -236,7 +245,7 @@ async function verifySpecialPool(market, account, decoded, signal) {
   if(fresh.status!=="decoded"||!equal(fresh.base,token)||mint.length<82||mint[45]!==1) throw new Error("Käyrän tila muuttui");
   if(!isDbc){
     if(market.quoteToken!=="So11111111111111111111111111111111111111112") throw new Error("Moonit vastavaluutta virheellinen");
-    return {status:"approve",protocol:fresh.protocol,slot:result.context.slot,...curvePricing(fresh.protocol,bytes,mint[44])};
+    return {status:"approve",protocol:fresh.protocol,slot:result.context.slot,tokenDecimals:mint[44],...curvePricing(fresh.protocol,bytes,mint[44])};
   }
   const cfg=accountBytes(config), qm=accountBytes(q);
   if(config.owner!==p.owner||!equal(bytes.slice(72,104),publicKeyBytes(configKey))||cfg.length<40||!equal(cfg.subarray(0,8),[26,108,14,123,116,230,129,43])||!equal(cfg.slice(8,40),publicKeyBytes(market.quoteToken))||!tokenPrograms.has(q.owner)||qm.length<82||qm[45]!==1) throw new Error("DBC konfiguraatio virheellinen");
@@ -245,7 +254,7 @@ async function verifySpecialPool(market, account, decoded, signal) {
   const spotRatio=(Number(sqrt)/2**64)**2*10**(mint[44]-qm[44]);
   const baseAmount=Number(v.getBigUint64(232,true))/10**mint[44],quoteAmount=Number(v.getBigUint64(240,true))/10**qm[44];
   if(!Number.isFinite(spotRatio)||spotRatio<=0||baseAmount<=0||quoteAmount<=0) throw new Error("DBC reservit virheelliset");
-  return {status:"approve",protocol:fresh.protocol,slot:result.context.slot,priceMode:"dbc_curve",spotRatio,baseAmount,quoteAmount};
+  return {status:"approve",protocol:fresh.protocol,slot:result.context.slot,tokenDecimals:mint[44],priceMode:"dbc_curve",spotRatio,baseAmount,quoteAmount};
 }
 
 const fieldP=(1n<<255n)-19n;
@@ -267,14 +276,23 @@ export async function pumpCurveAddress(mint,program){
   throw new Error("Pump.fun PDA puuttuu");
 }
 async function verifyPumpCurve(market,account,signal){
-  const sol="So11111111111111111111111111111111111111112";
-  if(market.quoteToken!==sol||await pumpCurveAddress(market.token,account.owner)!==market.pool)throw new Error("Pump.fun PDA tai vastavaluutta ei täsmää");
+  if(![wsol,usdc].includes(market.quoteToken)||await pumpCurveAddress(market.token,account.owner)!==market.pool)throw new Error("Pump.fun PDA tai vastavaluutta ei täsmää");
   const result=await rpcCall("getMultipleAccounts",[[market.pool,market.token],{commitment:"confirmed",encoding:"base64"}],signal);
   const [p,m]=result?.value??[];
   if(p?.owner!==account.owner||!tokenPrograms.has(m?.owner)||!Number.isSafeInteger(result?.context?.slot)||result.context.slot<=0)throw new Error("Pump.fun snapshot virheellinen");
   const bytes=accountBytes(p),mint=accountBytes(m),fresh=decodePool(p.owner,bytes);
-  if(fresh.status!=="decoded"||mint.length<82||mint[45]!==1||!equal(fresh.quote,publicKeyBytes(sol)))throw new Error("Pump.fun käyrä tai mintti virheellinen");
-  return {status:"approve",protocol:fresh.protocol,slot:result.context.slot,...curvePricing(fresh.protocol,bytes,mint[44])};
+  if(fresh.status!=="decoded"||mint.length<82||mint[45]!==1||pumpQuoteMint(bytes)!==market.quoteToken ||
+      bytes[81] || bytes[82] || bytes[123] || bytes[124])throw new Error("Pump.fun käyrä tai mintti virheellinen");
+  const state = new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const quoteScale = market.quoteToken === wsol ? 1e9 : 1e6;
+  const virtualBase = Number(state.getBigUint64(8,true))/10**mint[44];
+  const virtualQuote = Number(state.getBigUint64(16,true))/quoteScale;
+  const realQuote = Number(state.getBigUint64(32,true))/quoteScale;
+  if (!(virtualBase>0 && virtualQuote>0 && realQuote>0 && state.getBigUint64(24,true)>0n)) {
+    return {status:"reject",protocol:fresh.protocol,reason:"Pump.fun myyntireservi tyhjä"};
+  }
+  return {status:"approve",protocol:fresh.protocol,slot:result.context.slot,priceMode:"bonding_curve",
+    spotRatio:virtualQuote/virtualBase,liquidityQuote:2*realQuote,tokenDecimals:mint[44]};
 }
 
 /* Active price range metadata; not a multi-tick executable quote. */

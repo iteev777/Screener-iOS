@@ -7,7 +7,8 @@ const now = 1800000000000;
 const mint = "So11111111111111111111111111111111111111112";
 const pool = "11111111111111111111111111111111";
 const provenance = new Set(["PumpPortal", "Latest Profiles"]);
-const pair = { chainId: "solana", baseToken: { address: mint }, pairAddress: pool, priceUsd: "10",
+const pair = { chainId: "solana", baseToken: { address: mint },
+  quoteToken:{address:"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"}, pairAddress: pool, priceUsd: "10",
   liquidity: { usd: 50000 }, volume: { m5: 5000, h1: 21000, h6: 55000, h24: 110000 },
   txns: { m5: { buys: 9, sells: 3 }, h1: { buys: 30, sells: 10 } },
   priceChange: { m5: 2, h1: 1, h6: 3, h24: 4 }, pairCreatedAt: now - 600000 };

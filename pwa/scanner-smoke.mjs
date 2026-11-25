@@ -16,8 +16,6 @@ const market = [
 try {
   const page = await browser.newPage(emulatedWebKit ? devices["iPhone 13"] : { viewport: { width: 390, height: 844 } });
   const errors = [];
-  const workers = [];
-  page.on("worker", worker => workers.push(worker.url()));
   page.on("pageerror", error => errors.push(error.message));
 
   const profile = process.env.SCREENER_SCANNER_PROFILE;
@@ -30,6 +28,12 @@ try {
   let notificationCount = 0;
   let dropping = false;
   let fail = false;
+  const attemptedSizes=[];
+  const testReprice=momentum && process.env.SCREENER_PRICE_REPRICE==="1";
+  let movedPrice=false;
+  let changedQuotes=0;
+  let returnedOldQuote=false;
+  const mark=token=>testReprice && movedPrice && token===market[0][0]?104:100;
   await page.route("https://api.geckoterminal.com/api/v2/networks/solana/**", route =>
     route.fulfill({ json: { data: (dropping ? [] : market).map(([token, pool]) => ({
       attributes: { address: pool, base_token_price_usd: "100", reserve_in_usd: "100000",
@@ -64,17 +68,18 @@ try {
   await page.route("https://api.dexscreener.com/tokens/v1/solana/**", route =>
     route.fulfill({ json: (dropping ? [] : market).filter(([token]) => route.request().url().includes(token)).map(([token, pool, symbol]) => ({
       chainId: "solana", pairAddress: pool, baseToken: { address: token, symbol }, quoteToken: { address: wsol },
-      priceUsd: "100", liquidity: { usd: 100000 }, volume: { h24: 200000, h6: 200000, h1: 80000, m5: 25000 },
+      priceUsd:String(mark(token)), liquidity: { usd: 100000 }, volume: { h24: 200000, h6: 200000, h1: 80000, m5: 25000 },
       pairCreatedAt: Date.now() - 30 * 60000,
-      priceChange: { m5: 2, h1: 1, h6: 3, h24: 4 }, txns: { m5: { buys: 90, sells: 10 } }
+      priceChange: { m5: momentum?7:2, h1: 1, h6: 3, h24: 4 }, txns: { m5: { buys: 90, sells: 10 } }
     })) }));
   await page.route("https://api.dexscreener.com/latest/dex/pairs/solana/**", route => {
     const selected = market.filter(([, pool]) => route.request().url().includes(pool));
     assert.ok(selected.length > 0);
     if (fail) return route.fulfill({ status: 503 });
+    if (testReprice && returnedOldQuote && selected.some(([token])=>token===market[0][0])) movedPrice=true;
     return route.fulfill({ json: { pairs: selected.map(([token, pool, symbol]) => ({
       chainId: "solana", pairAddress: pool, baseToken: { address: token, symbol }, quoteToken: { address: wsol },
-      priceUsd: dropping ? "80" : "100", liquidity: { usd: 100000 }, volume: { h24: 30000 }
+      priceUsd:dropping?"80":String(mark(token)), liquidity: { usd: 100000 }, volume: { h24: 30000 }
     })) } });
   });
   await page.route("https://api.mainnet-beta.solana.com/", route => {
@@ -85,9 +90,11 @@ try {
       const tokenProgram = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
       const pack = (data, program) => ({ executable: false, owner: program, data: [Buffer.from(data).toString("base64"), "base64"] });
       const poolState = pool => {
+        const listed=market.find(row=>row[1]===pool);
+        if (!listed) return null;
         const bytes = new Uint8Array(413);
         bytes.set([247, 237, 227, 245, 215, 195, 222, 70]);
-        bytes.set(publicKeyBytes(market.find(row => row[1] === pool)[0]), 168);
+        bytes.set(publicKeyBytes(listed[0]), 168);
         bytes.set(publicKeyBytes(wsol), 200);
         bytes.set(publicKeyBytes(market[1][1]), 72);
         bytes.set(publicKeyBytes(market[0][0]), 104);
@@ -123,11 +130,20 @@ try {
       liquidity: { usd: 100000 } }] }));
   await page.route("https://api.jup.ag/swap/v2/order?**", route => {
     const params = new URL(route.request().url()).searchParams;
-    const out = params.get("inputMint") === wsol ? BigInt(params.get("amount"))
-      : BigInt(params.get("amount")) * 98n / 100n;
+    const amount=BigInt(params.get("amount"));
+    const slippage=BigInt(params.get("slippageBps"));
+    const resized=momentum && params.get("inputMint")===wsol && params.get("outputMint")===market[0][0];
+    if (resized) attemptedSizes.push(amount);
+    const buy=params.get("inputMint")===wsol;
+    const target=params.get(buy?"outputMint":"inputMint");
+    const price=BigInt(mark(target));
+    if (resized && movedPrice) changedQuotes++;
+    if (!buy && target===market[0][0] && !movedPrice) returnedOldQuote=true;
+    const out=buy ? amount*100n/(price*1000n) : amount*price*1000n*(dropping?7800n:9800n)/1000000n;
     return route.fulfill({ json: { inputMint: params.get("inputMint"), outputMint: params.get("outputMint"),
-      inAmount: params.get("amount"), outAmount: String(out), otherAmountThreshold: String(out * 99n / 100n),
-      priceImpactPct: "0.001", routePlan: [{ percent: 100, swapInfo: { label: "fixture" } }], transaction: null } });
+      inAmount: params.get("amount"), outAmount: String(out), otherAmountThreshold: String(out*(10000n-slippage)/10000n),
+      priceImpactPct: resized && amount>120_000_000n ? ".06" : "0.001",
+      routePlan: [{ percent: 100, swapInfo: { label: "fixture" } }], transaction: null } });
   });
   await page.goto(site);
   await view(page, "settings");
@@ -142,12 +158,13 @@ try {
   await page.getByRole("button", { name: "Tallenna asetukset" }).click();
   await page.locator("#status").getByText("Asetukset tallennettu.").waitFor();
   await page.clock.install();
+  const analyst = page.waitForEvent("worker", { predicate:worker=>worker.url().endsWith("/analyst-worker.js") });
   await page.locator("#scan").click();
+  await analyst;
   await view(page, "monitoring");
   await page.locator("#agent-cards article").last().waitFor();
   assert.equal(await page.locator("#agent-cards article").count(), 5);
-  assert.ok(workers.some(url => url.endsWith("/analyst-worker.js")));
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 24; i++) {
     await page.clock.runFor(3001);
     if (await page.locator("#scan-positions li").count() === 2) break;
   }
@@ -180,6 +197,12 @@ try {
       };
     }));
     assert.equal(state.trades.length, 2);
+    assert.ok(attemptedSizes.some(size=>size>120_000_000n) && attemptedSizes.some(size=>size<=120_000_000n));
+    assert.ok(state.trades.find(row=>row.token===market[0][0]).notional<=12);
+    if (testReprice) {
+      assert.ok(movedPrice && changedQuotes>=1);
+      assert.equal(state.trades.find(row=>row.token===market[0][0]).market.price,104);
+    }
     assert.ok(state.trades.every(trade => trade.strategy === 8 && trade.score >= 80 && trade.feeUsd > 0));
     assert.ok(state.history.length > 0);
     assert.ok(notificationCount > 0);
@@ -192,13 +215,31 @@ try {
   fail = false;
   dropping = true;
   await page.clock.setSystemTime(Date.now() + 121000);
-  await page.clock.runFor(6001);
+  for (let i=0;i<8;i++) {
+    await page.clock.runFor(3001);
+    if (!(await page.locator("#scan-positions li").count())) break;
+  }
   await view(page, "positions");
   await page.locator("#scan-trades").getByText(/Myynti.*SECOND/).waitFor();
   await page.waitForFunction(() => document.querySelectorAll("#scan-positions li").length === 0);
   await page.evaluate(() => window.dispatchEvent(new Event("offline")));
   await page.locator("#status").getByText(/Verkkoyhteys katkesi/).waitFor();
   assert.equal(await page.locator("#stop").isDisabled(), true);
+  if (momentum) {
+    await page.waitForFunction(() => new Promise((resolve, reject) => {
+      const request = indexedDB.open("screener-paper");
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+        const read = db.transaction("books").objectStore("books").get("paper-momentum-learning");
+        read.onerror = () => reject(read.error);
+        read.onsuccess = () => {
+          db.close();
+          resolve(read.result?.samples.filter(sample => sample.type === "paper").length === 2);
+        };
+      };
+    }));
+  }
   await page.reload();
   await view(page, "positions");
   await page.locator("#scan-trades").getByText(/Myynti.*SECOND/).waitFor();

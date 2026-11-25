@@ -109,3 +109,27 @@ test("Trojan paper entries cap order notional to five dollars and 10% of availab
   run(low, [tick("B")], settings);
   assert.deepEqual(Object.keys(low.positions), []);
 });
+
+test("Momentum can buy on observed short volume without a daily volume field",()=>{
+  const entry={...tick("A"),volume:undefined,shortVolume:700,score:90,track:"short"};
+  const settings={...policy,strategy:8};
+  assert.equal(run(newPortfolio(),[entry],settings).trades.length,1);
+  assert.equal(run(newPortfolio(),[{...entry,shortVolume:undefined}],settings).trades.length,0);
+  assert.equal(run(newPortfolio(),[{...entry,entryQuotePrice:102}],settings).trades[0].price,102);
+});
+
+test("a failed sell quote leaves a marked Paper position open and a validated quote bounds its fill",()=>{
+  const settings={...policy,strategy:8};
+  const book=run(newPortfolio(),[{...tick("A"),score:90}],settings);
+  const position=book.positions["A:A"];
+  assert.ok(position);
+  const low={...tick("A",80,200000),requireExitQuote:true,exitsOnly:true};
+  run(book,[low],settings);
+  assert.equal(book.trades.length,1);
+  assert.equal(book.positions["A:A"].mark,80);
+  assert.match(book.decisions[0].reason,/Jupiter-myyntitarjousta/);
+  run(book,[{...low,at:203000,exitQuote:{price:75,quantity:position.sol,expires:Date.now()+1000}}],settings);
+  assert.equal(book.trades[0].side,"Myynti");
+  assert.equal(book.trades[0].price,75);
+  assert.equal(book.positions["A:A"],undefined);
+});

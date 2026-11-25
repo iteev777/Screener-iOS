@@ -145,3 +145,56 @@ SCREENER_BENCH_SECONDS=3605 node --use-env-proxy pwa/paper-benchmark.mjs > /tmp/
 Testi raportoi analyysin vaiheet ja syyt. Mintti voi näkyä eri vaiheissa ja syissä, jos sen tiedot täydentyvät tai muuttuvat. Pisterajavertailu laskee ehdokkaat, jotka täyttivät muut momentumin ehdot. Se kuvaa pisterajan herkkyyttä ennen mintti-, RugCheck-, likviditeetti- ja reittitarkistuksia. Nettonoteeraus sisältää kassan ja avoimet positiot viimeisillä hinnoilla. Voittoprosentti ja pitoaika lasketaan kokonaan suljetuista positioista, osamyynnit mukaan lukien. Arvonalenema lasketaan simuloidun salkun noteeratuista huipuista.
 
 Aiemmasta 15 minuutin ajosta tallennetuilla 300 aidolla DEX-parivastauksella vanha ja uusi pisteytys päästivät kumpikin viisi rajan 80 läpi. Uuden pisteytyksen rajat 70, 72 ja 76 päästivät kukin seitsemän, raja 84 kolme ja raja 88 yhden. Kun uuden pisteytyksen viiden ehdokkaan mintit ja RugCheck tarkistettiin erikseen nykyisestä ketju- ja raporttidatasta, kaksi pysähtyi minttitarkistukseen ja kolme RugCheckiin. Pisteraja säilytettiin 80:ssä. Tämä testi ei käytä historiasta arvattuja RugCheck-tiloja tai oston jälkeistä tuottoa.
+
+### Lyhyen aikavälin Paper-signaali ja oppiminen
+
+Momentum käyttää kolmea arviointipolkua. Perinteinen polku lukee palvelun viiden minuutin jaksoa. Lyhyt polku käyttää saman poolin aikaleimattuja kauppoja. Varhaisen virtauksen polku voi arvioida hinnaltaan ja likviditeetiltään tunnetun poolin ennen viiden minuutin tietojen valmistumista. Se edellyttää mitattua ostovirtaa, riittävää dollarivolyymia ja mallinnetut kulut ylittävää hintaliikettä. Puuttuva aineisto merkitään odotukseksi. GeckoTerminalin kokonainen poolivastaus voi korvata puuttuvan DEX-noteerauksen. Ilmoitus uudesta datasta lyhentää uudelleenanalyysin odotusta, myös silloin kun ehdokas on jo analyysissä.
+
+Oppiminen käyttää suljettujen Paper-positioiden toteutunutta nettotulosta sekä saman poolin aikaisintaan kahden minuutin päästä saatua noteerausta. Hintaseurantahavaintoihin vähennetään kulut ja arvioitu liukuma. Tulokset tallennetaan IndexedDB:hen. Kolme polkua kalibroidaan erikseen käyttäjän pisterajan ympärillä. Pisterajaa voidaan laskea enintään neljä pistettä, kun vähintään 18 eri poolin pisterajan lähellä olevaa ja mintti- sekä RugCheck-tarkistettua havaintoa tukevat sitä. Riittävä tappiollinen aineisto voi nostaa rajaa enintään kuusi pistettä. Puuttuva hintadata ja turvallisuushylkäykset eivät kelpaa pisterajan laskemisen aineistoksi. Hintaseuranta ei ole toteutunut kauppa.
+
+Jokainen ostettava token tarvitsee edelleen tuoreen hinnan, riskirajan täyttävän likviditeetin, hyväksytyn mintti- ja RugCheck-tarkistuksen, varmennetun poolin sekä Jupiterin osto- ja myyntireitin. Paper-kirja soveltaa pääoma-, altistus-, tappio-, osto- ja jäähyrajoja sekä mallinnettua toteutusviivettä. Nopean signaalin position voi sulkea aikaisin, jos aikaleimattu lyhyen aikavälin kauppavirta osoittaa käänteen ja liike jää kulujen alle.
+
+```sh
+SCREENER_BENCH_SECONDS=3605 SCREENER_BENCH_LEARNING=/tmp/paper-learning.json \
+  node --use-env-proxy pwa/paper-benchmark.mjs > /tmp/paper-momentum-adaptive.jsonl
+```
+
+Jupiter v2:n hintavaikutus voi olla etumerkillinen. Sovellus muuntaa `priceImpactPct`-suhdeluvun prosenttiyksiköiksi ja tarkistaa itseisarvon. `priceImpact`-varakenttä on jo prosenttiyksiköissä. Oston ja vastakkaisen myyntireitin tarkistukset, kolmen prosentin reittikohtainen enimmäisvaikutus ja viiden prosentin edestakainen enimmäisvaikutus säilyvät.
+
+#### Paper-oppimisen havaintohorisontit ja malliversiot
+
+Tuoreita poolihintoja tallennetaan saatavuuden mukaan 15, 30, 60, 120, 300, 900 ja 3 600 sekunnin kohdalla. Pidemmille horisonteille varataan rajattu otos. Vain toteutusaikaan oikeasti saatavilla olevasta noteerauksesta syntyy havainto. Mallin varsinainen hintaseurantahorisontti on 120 sekuntia. Lyhyemmät ja pidemmät havainnot säilytetään erikseen, jotta samaa toteumaa ei lasketa moneen kertaan.
+
+Ostopaineen, volyymitahdin, hintaliikkeen ja likviditeetin yhteyttä kustannuskorjattuun nettotulokseen arvioidaan erikseen tokenin iän, tuntitrendin ja signaalipolun mukaan. Toteutuneet Paper-positiot ja hintaseuranta käytetään eri ryhmissä. Hintaseurantalabeli voi ohjata mallia vasta mintti- ja RugCheck-tarkistusten jälkeen. Painon muutoksen hyväksyntä vaatii vähintään 36 eri poolin aineiston ja saman suuntaisen vaikutuksen kronologisessa tarkistusaineistossa. Painojen vaikutus signaaliin rajataan neljään pisteeseen, ja turvallisuus- sekä pääomaportit suoritetaan edelleen ennen ostoa.
+
+Paper-oppimisesta säilytetään kymmenen viimeisintä strategiamallia. Asetuksen **Edellinen tallennettu malli tai lähtöasetukset** voi ottaa käyttöön pysäytetyssä Paper-tilassa. Se lukitsee edellisen mallin käytön. Havaintoja voi edelleen kertyä, ja valinta tallentuu sovelluksen asetuksiin. GeckoTerminalin pooli- ja kauppahaut jakavat pyyntötahtinsa ja yhteisen kiintiötaukonsa.
+
+#### Poolin tunnistus, toteutustarjoukset ja vaiheloki
+
+Momentum erottaa listauksesta puuttuvan poolin, puuttuvan USD-hinnan, puuttuvan likviditeetin, nollahinnan, nollareservin ja vanhentuneen noteerauksen. DEX Screenerin quote-puolen tokenille voidaan laskea USD-hinta vain samassa vastauksessa annetusta base-hinnasta ja parin hintasuhteesta. USD-kynttilöitä ei käännetä tämän perusteella. Jupiterin tokenihaku antaa pooliehdokkaita. Pooliehdokkaan tokenpari varmistetaan GeckoTerminalin vastauksesta. Jupiterin tokenitason likviditeettiä ei käsitellä tietyn poolin likviditeettinä.
+
+PumpPortalista saatua bonding curve -osoitetta verrataan mintille johdettuun kanoniseen osoitteeseen. Solana RPC:n vahvistettu tilannekuva antaa mintin desimaalit, vastavaluutan ja reservit. USD-noteeraus saadaan mitatusta SOL- tai USDC-hinnasta. Likviditeetti perustuu oikeaan myyntivastavaluutan reserviin. SOL-curvejen tarkkailussa voidaan lisäksi käyttää Pump-ohjelman vahvistettuja TradeEvent-lokeja. GeckoTerminalin ja RPC:n kauppatapahtumia ei lasketa yhteen samalta poolilta. Token-2022-mintti voi edetä riskitarkistukseen, kun minttaus- ja jäädytysvaltuudet puuttuvat ja ainoat ilmoitetut laajennukset koskevat metadataa. RugCheck ja poolin tarkistus tehdään normaalisti.
+
+Jupiterin read-only-esitarkistus käynnistyy lupaavalle signaalille rinnakkain muiden turvallisuustarkistusten kanssa. Paper-ostoon vaaditaan kaikki tarkistukset, soveltuva poolisyvyys, vahvistettu mintin desimaali ja poolin hintaa vastaava kaksisuuntainen tarjous. Automaattinen Paper-myynti odottaa kyseiselle määrälle saadun tuoreen Jupiter-tarjouksen. Epäonnistuneessa myynnissä positiota merkitään edelleen tuoreella markkinahinnalla. Toteutunut Paper-myynti käyttää enintään tarjouksen ja liukuman mukaista hintaa.
+
+Hintaseuranta pitää aiemmat markkinahavainnot tallessa. Koulutusdataksi kelpaa suljetun Paper-position nettotulos tai turvallisuustarkistetun ehdokkaan vastaava virtuaalinen havainto. Virtuaalinen havainto vaatii pyyntöhetken osto- ja myyntireitit sekä 120 sekunnin kohdalla tarkan tokenimäärän uuden myyntitarjouksen. Virtuaalinen seuranta ei muuta Paper-saldoa. Hintamerkit ilman näitä tarjouksia säilyvät diagnostiikassa. Pistekynnyksen ja painojen mukautus tarkistetaan erillisessä kronologisessa aineistossa.
+
+Sama Paper-ajo tuottaa vaiheiden läpäisyt ja syyt. Valinnainen trace-tiedosto kirjaa tokenkohtaiset vaiheiden muutokset ja toteumat.
+
+```sh
+SCREENER_BENCH_SECONDS=3605 SCREENER_BENCH_LEARNING=/tmp/paper-learning.json \
+  SCREENER_BENCH_TRACE=/tmp/paper-stage-trace.jsonl \
+  node --use-env-proxy pwa/paper-benchmark.mjs > /tmp/paper-funnel.jsonl
+```
+
+#### Paper Momentumin toteutuskoko ja aikajärjestyksessä kalibroitu malli
+
+Momentum tarkastelee dokumentoituja kauppaikkunoita ja samasta poolista sekä lähteestä saatuja aikaleimattuja hintahavaintoja. Hintojen nousu tarvitsee tuekseen mitattua toteumavolyymia ja ostopainetta. Eri lähteistä saatuja hintatasoja ei yhdistetä hetkelliseksi tuotoksi. Jokaisen rolling-suodattimen osuma tallennetaan tuntiajon vaihelogiin.
+
+Kaksisuuntainen Jupiter-tarjous pyydetään Paper-saldon, pisteiden ja likviditeetin perusteella mitoitetulle ostolle. Tarjous voi käynnistää yhden pienemmän kokovertailun. Varaus estää Paper-salkkua ostamasta varmennettua määrää suurempaa positiota. Osto tarkistaa edestakaisen reitin kulut, liukuman, arvioidun nettoliikkeen ja ehdottomat vaikutusrajat. Potentiaalinen tuotto on havaittuun liikkeeseen perustuva arvio. Paper-voiton kotiuttaminen tarkistaa myyntitarjouksen nettotuoton. Riskipoistumiset, päiväkohtainen tappioraja ja kokonaisaltistus pysyvät erillään arviosta.
+
+Varmennetulla virtuaalisella sisääntulolla voidaan pyytää myyntitarjouksia 15, 30, 60, 120, 180, 300 ja 900 sekunnin kohdalla. Suora hintaseuranta säilyy laajemmalla otoksella. Ajallaan saatua erillistä myyntitarjousta käytetään koulutuksessa täsmälleen alkuperäisen tokenimäärän mukaan. Paper-saldon ulkopuoliseen toteutusaineistoon merkitään myös nettoliikkeen ennusteen vuoksi ohitettu ehdokas, jos reitin ehdottomat ehdot ja turvatarkastukset täyttyvät.
+
+Painojen, koon ja poistumisen mukautus edellyttää eri pooleista saatua koulutus- ja vertailuaineistoa. Analyysiajat ovat kronologisessa järjestyksessä ja ennen vertailun alkua valmistuneet tulokset muodostavat koulutusaineiston. Otoksen koon tai tulosten puuttuessa käytetään lähtöasetuksia. Vanha Paper-kirja ja toteumat ovat edelleen käytettävissä.
+
+Sallitun hintamuutoksen ylittävä tuore noteeraus mitätöi vanhan tarjouksen ja aikaistaa ehdokkaan uudelleenanalyysiä. Uusi osto edellyttää jälleen kelvollista signaalia ja tarjousta. Turvallisuustarkastuksensa läpäisseet odottavat ehdokkaat saavat tarjousten käsittelyssä etusijan. Avoimelle Momentum-positiolle ei haeta uusia ostotarjouksia.

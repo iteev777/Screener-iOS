@@ -23,6 +23,26 @@ test("full RugCheck evaluates holder concentration and LP locks and fails closed
   assert.equal(fullRugCheck({ ...safe(), totalMarketLiquidity: 0 }).status, "reject");
 });
 
+test("RugCheck distinguishes its disabled authority sentinel from a fee or graph risk",()=>{
+  const transferFee={pct:0,maxAmount:0,authority:"11111111111111111111111111111111"};
+  const normal=fullRugCheck({...safe(),transferFee});
+  assert.ok(!normal.reasons.includes("Siirtomaksuvaltuus aktiivinen"));
+  const active=fullRugCheck({...safe(),transferFee:{...transferFee,authority:"real-authority"}});
+  assert.ok(active.reasons.includes("Siirtomaksuvaltuus aktiivinen"));
+  assert.equal(fullRugCheck({...safe(),transferFee:{...transferFee,pct:10}}).status,"reject");
+  assert.equal(fullRugCheck({...safe(),transferFee,graphInsidersDetected:3}).status,"reject");
+});
+
+test("equivalent metadata findings count once, while separate severe risks remain blocking",()=>{
+  const report={...safe(),updateAuthority:"enabled",risks:[
+    {name:"Mutable metadata",level:"warn"},{name:"Mutable metadata",level:"warn"}]};
+  assert.equal(fullRugCheck(report).medium,1);
+  assert.equal(fullRugCheck(report).status,"approve");
+  assert.equal(fullRugCheck({...report,graphInsidersDetected:3}).status,"reject");
+  const {freezeAuthority,...partial}=report.token;
+  assert.equal(fullRugCheck({...report,token:partial}).status,"watch");
+});
+
 test("pool decoder enforces owner, discriminator, status and RPC mint binding", async t => {
   const bytes = new Uint8Array(413);
   bytes.set([247, 237, 227, 245, 215, 195, 222, 70]);
@@ -69,4 +89,14 @@ test("Jupiter v2 checks amounts, route quality, impact and simulation drift with
   drift = true;
   assert.equal((await analyzeEntryRoute(token, 5, { solUsd: 100, taker: pool })).allowed, false);
   assert.deepEqual(methods, ["simulateTransaction"]);
+});
+
+test("Jupiter v2 signed impact keeps the same risk cap in both quote formats", () => {
+  const routePlan = [{ swapInfo: {}, percent: 100, bps: 10000 }];
+  assert.equal(routeQuality({ priceImpactPct:"-0.00025", priceImpact:-.025, routePlan }).allowed,true);
+  assert.equal(routeQuality({ priceImpactPct:"-0.00025", routePlan }).impact,.025);
+  assert.equal(routeQuality({ priceImpact:-.025, routePlan }).impact,.025);
+  assert.equal(routeQuality({ priceImpactPct:"-0.04", routePlan }).allowed,false);
+  assert.equal(routeQuality({ priceImpact:-4, routePlan }).allowed,false);
+  assert.equal(routeQuality({ priceImpactPct:"-0.001", routePlan:[] }).allowed,false);
 });
