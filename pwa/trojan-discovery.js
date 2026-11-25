@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Browser adapters for Trojan V2 scanner.py, sniper_scanner.py and discovery/.
 import { fetchJson } from "./network.js";
-import { address, discoverMarkets, normalizePair } from "./markets.js";
+import { address, discoverMarkets, normalizePair, orientPair, pairState } from "./markets.js";
 import { candidateQuality } from "./trojan-analysis.js";
 
 const dex = "https://api.dexscreener.com";
@@ -22,7 +22,9 @@ function metadata(row) {
   return { name: row?.name ?? row?.tokenMeta?.name, symbol: row?.symbol ?? row?.tokenMeta?.symbol,
     creator: row?.creator ?? row?.traderPublicKey, icon: row?.icon ?? row?.logoURI ?? row?.logo,
     priceUsd: row?.usdPrice ?? row?.priceUsd, liquidityUsd: row?.liquidity_usd ?? row?.liquidity,
-    marketCap: row?.mcap ?? row?.marketCap, fdv: row?.fdv, volume24h: row?.volume_24h_usd ?? row?.v24hUSD };
+    marketCap: row?.mcap ?? row?.marketCap, fdv: row?.fdv, volume24h: row?.volume_24h_usd ?? row?.v24hUSD,
+    poolHint: row?.firstPool?.id !== (row?.id ?? row?.token) ? row?.firstPool?.id ?? row?.poolHint : undefined,
+    curveHint: row?.curveHint };
 }
 export function sourcesFor(birdeyeKey, tape) {
   const sources = endpoints.map(([name, path, interval]) => ({ name, interval, load: async signal => {
@@ -74,10 +76,13 @@ export function sourcesFor(birdeyeKey, tape) {
 }
 
 const marketCaches=new WeakMap();
+export function marketEvidence(token, signal) {
+  return marketCaches.get(signal)?.get(token);
+}
 export function invalidateMarket(token, signal, at) {
   const cache = marketCaches.get(signal);
   const entry = cache?.get(token);
-  if (entry?.value && at - entry.value.observedAt >= 3000) cache.delete(token);
+  if (entry && at - entry.at >= 3000) cache.delete(token);
 }
 export async function marketBatch(tokens, signal) {
   if (!tokens.length || tokens.length > 30 || tokens.some(token => typeof token !== "string" || !address.test(token))) {
@@ -91,14 +96,28 @@ export async function marketBatch(tokens, signal) {
   const requested = new Set(missing);
   const rows = await fetchJson(`${dex}/tokens/v1/solana/${missing.join(",")}`, {}, signal);
   if (!Array.isArray(rows)) throw new Error("Virheellinen tokenien hintaerä");
-  for (const raw of rows) {
-    const market = normalizePair(raw);
-    if (!market || !requested.has(market.token)) continue;
-    if (!best.has(market.token) || market.liquidity > best.get(market.token).market.liquidity) {
-      best.set(market.token, { market, raw, observedAt: Date.now() });
+  const observedAt = Date.now();
+  const states = new Map();
+  for (const pair of rows) {
+    for (const token of new Set([pair?.baseToken?.address, pair?.quoteToken?.address])) {
+      if (!requested.has(token)) continue;
+      const raw = orientPair(pair, token);
+      const state = pairState(raw);
+      const previous = states.get(token);
+      if (!previous || state === "priced" || previous.state === "invalid-pair") {
+        states.set(token, { state, raw: state === "invalid-pair" ? undefined : raw });
+      }
+      if (state !== "priced") continue;
+      const market = normalizePair(raw);
+      if (market && (!best.has(token) || market.liquidity > best.get(token).market.liquidity)) {
+        best.set(token, { market, raw, observedAt, provider: "DEX Screener" });
+      }
     }
   }
-  for(const token of missing)cache.set(token,{value:best.get(token),expires:now+(best.has(token)?5000:3000)});
+  for (const token of missing) cache.set(token, { value:best.get(token), at:observedAt,
+    state:states.get(token)?.state ?? "not-indexed", pool:states.get(token)?.raw?.pairAddress,
+    raw:states.get(token)?.raw,
+    expires:observedAt + (best.has(token) ? 5000 : 9000) });
   while(cache.size>3000)cache.delete(cache.keys().next().value);
   return best;
 }
@@ -130,7 +149,8 @@ export function watchPumpPortal(signal, emit, status, migrate) {
           if (seen.has(row.mint)) return;
           seen.add(row.mint);
           if (seen.size > 10000) seen.delete(seen.values().next().value);
-          emit({token:row.mint,name:row.name,symbol:row.symbol,creator:row.traderPublicKey});
+          emit({token:row.mint,name:row.name,symbol:row.symbol,creator:row.traderPublicKey,
+            curveHint:address.test(row.bondingCurveKey ?? "") ? row.bondingCurveKey : undefined});
         }
       } catch { /* Ignore malformed feed frames. */ }
     };

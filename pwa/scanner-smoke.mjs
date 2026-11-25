@@ -16,8 +16,6 @@ const market = [
 try {
   const page = await browser.newPage(emulatedWebKit ? devices["iPhone 13"] : { viewport: { width: 390, height: 844 } });
   const errors = [];
-  const workers = [];
-  page.on("worker", worker => workers.push(worker.url()));
   page.on("pageerror", error => errors.push(error.message));
 
   const profile = process.env.SCREENER_SCANNER_PROFILE;
@@ -85,9 +83,11 @@ try {
       const tokenProgram = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
       const pack = (data, program) => ({ executable: false, owner: program, data: [Buffer.from(data).toString("base64"), "base64"] });
       const poolState = pool => {
+        const listed=market.find(row=>row[1]===pool);
+        if (!listed) return null;
         const bytes = new Uint8Array(413);
         bytes.set([247, 237, 227, 245, 215, 195, 222, 70]);
-        bytes.set(publicKeyBytes(market.find(row => row[1] === pool)[0]), 168);
+        bytes.set(publicKeyBytes(listed[0]), 168);
         bytes.set(publicKeyBytes(wsol), 200);
         bytes.set(publicKeyBytes(market[1][1]), 72);
         bytes.set(publicKeyBytes(market[0][0]), 104);
@@ -123,8 +123,9 @@ try {
       liquidity: { usd: 100000 } }] }));
   await page.route("https://api.jup.ag/swap/v2/order?**", route => {
     const params = new URL(route.request().url()).searchParams;
-    const out = params.get("inputMint") === wsol ? BigInt(params.get("amount"))
-      : BigInt(params.get("amount")) * 98n / 100n;
+    const amount=BigInt(params.get("amount"));
+    const out = params.get("inputMint") === wsol ? amount/1000n
+      : amount*1000n*(dropping?78n:98n)/100n;
     return route.fulfill({ json: { inputMint: params.get("inputMint"), outputMint: params.get("outputMint"),
       inAmount: params.get("amount"), outAmount: String(out), otherAmountThreshold: String(out * 99n / 100n),
       priceImpactPct: "0.001", routePlan: [{ percent: 100, swapInfo: { label: "fixture" } }], transaction: null } });
@@ -142,11 +143,12 @@ try {
   await page.getByRole("button", { name: "Tallenna asetukset" }).click();
   await page.locator("#status").getByText("Asetukset tallennettu.").waitFor();
   await page.clock.install();
+  const analyst = page.waitForEvent("worker", { predicate:worker=>worker.url().endsWith("/analyst-worker.js") });
   await page.locator("#scan").click();
+  await analyst;
   await view(page, "monitoring");
   await page.locator("#agent-cards article").last().waitFor();
   assert.equal(await page.locator("#agent-cards article").count(), 5);
-  assert.ok(workers.some(url => url.endsWith("/analyst-worker.js")));
   for (let i = 0; i < 20; i++) {
     await page.clock.runFor(3001);
     if (await page.locator("#scan-positions li").count() === 2) break;
@@ -192,7 +194,10 @@ try {
   fail = false;
   dropping = true;
   await page.clock.setSystemTime(Date.now() + 121000);
-  await page.clock.runFor(6001);
+  for (let i=0;i<8;i++) {
+    await page.clock.runFor(3001);
+    if (!(await page.locator("#scan-positions li").count())) break;
+  }
   await view(page, "positions");
   await page.locator("#scan-trades").getByText(/Myynti.*SECOND/).waitFor();
   await page.waitForFunction(() => document.querySelectorAll("#scan-positions li").length === 0);

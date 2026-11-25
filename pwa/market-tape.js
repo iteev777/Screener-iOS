@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-import { address, normalizePair } from "./markets.js";
+import { address, normalizePair, orientPair } from "./markets.js";
 import { fetchJson } from "./network.js";
 
 const gecko = "https://api.geckoterminal.com/api/v2/networks/solana";
@@ -9,7 +9,7 @@ const windows = ["m5", "h1", "h6", "h24"];
 const fields = row => Object.fromEntries(windows.map(key => [key, number(row?.[key])]));
 const mintId = id => typeof id === "string" && id.startsWith("solana_") && address.test(id.slice(7)) ? id.slice(7) : undefined;
 
-export function geckoPairs(result, at) {
+export function geckoPairs(result, at, wanted) {
   if (!Array.isArray(result?.data)) throw new Error("Virheellinen GeckoTerminal-poolivastaus");
   const tokens = new Map((result.included ?? []).map(item => [item.id, item.attributes]));
   return result.data.flatMap(row => {
@@ -18,13 +18,18 @@ export function geckoPairs(result, at) {
     const quote = row.relationships?.quote_token?.data?.id;
     const raw = {
       chainId: "solana", pairAddress: attr?.address, baseToken: { ...tokens.get(base), address: mintId(base) },
-      quoteToken: { address: mintId(quote) }, priceUsd: attr?.base_token_price_usd,
+      quoteToken: { ...tokens.get(quote), address: mintId(quote) }, priceUsd: attr?.base_token_price_usd,
+      quotePriceUsd: attr?.quote_token_price_usd, priceNative: attr?.base_token_price_quote_token,
       liquidity: { usd: number(attr?.reserve_in_usd) }, volume: fields(attr?.volume_usd),
       priceChange: fields(attr?.price_change_percentage), txns: attr?.transactions,
       pairCreatedAt: Date.parse(attr?.pool_created_at), marketCap: number(attr?.market_cap_usd)
     };
-    const market = normalizePair(raw);
-    return market && raw.quoteToken.address ? [{ raw, market, observedAt: at, provider: "GeckoTerminal" }] : [];
+    const requested = wanted ? [raw.baseToken.address, raw.quoteToken.address].filter(token =>
+      token && wanted.has(`${attr?.address}:${token}`)) : [raw.baseToken.address];
+    return requested.flatMap(token => {
+      const pair = orientPair(raw,token), market = normalizePair(pair);
+      return market && pair.quoteToken.address ? [{ raw:pair, market, observedAt:at, provider:"GeckoTerminal" }] : [];
+    });
   });
 }
 
@@ -83,10 +88,23 @@ export function marketTape(signal) {
   const tradeKey = (pool, token) => `${pool}:${token}`;
   const canTrade = (pool, token, now) => !tradeBusy && now >= geckoBlockedUntil && now >= nextTrades &&
     now - (tradeCache.get(tradeKey(pool, token))?.at ?? 0) >= 12000;
+  function rememberTrades(key, incoming, now) {
+    const existing = tradeCache.get(key);
+    const rows = new Map((existing?.rows ?? []).filter(trade=>trade.source===incoming[0]?.source).map(trade => [trade.id,trade]));
+    const previous = rows.size;
+    for (const row of incoming) rows.set(row.id,row);
+    tradeCache.set(key,{at:existing?.at ?? 0,rows:[...rows.values()].filter(row=>row.at>=now-300000)
+      .sort((a,b)=>a.at-b.at).slice(-3000)});
+    while (tradeCache.size > 100) tradeCache.delete(tradeCache.keys().next().value);
+    return rows.size > previous;
+  }
   return {
     canRefresh,
     canTrade,
     trades(pool, token) { return tradeCache.get(`${pool}:${token}`)?.rows ?? []; },
+    recordTrades(pool, token, rows, now) {
+      return rows.length > 0 && rememberTrades(tradeKey(pool,token),rows,now);
+    },
     async refreshTrades(pool, token) {
       const now = Date.now(), key = tradeKey(pool, token);
       if (!address.test(pool) || !address.test(token) || !canTrade(pool,token,now)) return false;
@@ -96,17 +114,18 @@ export function marketTape(signal) {
       try {
         const data = await read(`/pools/${pool}/trades`);
         if (!Array.isArray(data?.data)) return false;
-        const rows = new Map((tradeCache.get(key)?.rows ?? []).map(t => [t.id,t]));
-        const previous = rows.size;
+        const rows = [];
         for (const row of data.data) {
           const a = row.attributes; if (!a || !row.id) continue;
           const buy = a.to_token_address === token, sell = a.from_token_address === token;
           if (buy === sell) continue;
           const t = {id:row.id, at:Date.parse(a.block_timestamp), price:number(buy?a.price_to_in_usd:a.price_from_in_usd), usd:number(a.volume_in_usd), side:buy?'buy':'sell', trader:address.test(a.tx_from_address ?? "") ? a.tx_from_address : undefined};
-          if (Number.isFinite(t.at) && t.price > 0 && t.usd > 0) rows.set(t.id,t);
+          if (Number.isFinite(t.at) && t.price > 0 && t.usd > 0) rows.push(t);
         }
-        tradeCache.set(key,{at:now,rows:[...rows.values()].filter(t=>t.at>=now-300000).sort((a,b)=>a.at-b.at).slice(-3000)});
-        return rows.size > previous;
+        // Use RPC tape for Pump.fun when available. Its event IDs differ from
+        // Gecko's and combining both could count the same fill twice.
+        if (tradeCache.get(key)?.rows.some(trade=>trade.source === "rpc" && trade.at >= now-30000)) return false;
+        return rows.length > 0 && rememberTrades(key,rows,now);
       } catch(e) { if(e.status===429) nextTrades=Date.now()+Math.max(60000,e.retryAfterMs??0); throw e; }
       finally { tradeBusy=false; }
     },
@@ -115,12 +134,12 @@ export function marketTape(signal) {
       active = true;
       next = Date.now() + 8000;
       try {
-        const payload = await read(`/pools/multi/${pools.map(pool => pool.pool).join(",")}?include=base_token`);
-        const rows = geckoPairs(payload, Date.now());
+        const ids = [...new Set(pools.map(pool=>pool.pool))].join(",");
+        const payload = await read(`/pools/multi/${ids}?include=base_token,quote_token`);
+        const wanted = new Set(pools.map(pool => `${pool.pool}:${pool.token}`));
+        const rows = geckoPairs(payload, Date.now(), wanted);
         remember(rows);
-        const requested = new Set(pools.map(pool => `${pool.pool}:${pool.token}`));
-        return rows.filter(({ market }) => requested.has(`${market.pool}:${market.token}`))
-          .map(({ market, observedAt }) => ({ ...market, at: observedAt }));
+        return rows.map(({ market, observedAt }) => ({ ...market, at: observedAt }));
       } catch (error) {
         if (error.status === 429) next = Date.now() + Math.max(60000, error.retryAfterMs ?? 0);
         throw error;
@@ -140,8 +159,10 @@ export function marketTape(signal) {
       next = now + 8000;
       retry.set(token, now + 60000);
       try {
-        const data = await read(`/tokens/${token}/pools?include=base_token&page=1`);
-        remember(geckoPairs(data, Date.now()).filter(row => row.market.token === token));
+        const data = await read(`/tokens/${token}/pools?include=base_token,quote_token&page=1`);
+        const wanted = new Set((Array.isArray(data?.data) ? data.data : []).map(row=>`${row.attributes?.address}:${token}`));
+        const ranked = geckoPairs(data, Date.now(),wanted).sort((a,b)=>b.market.liquidity-a.market.liquidity);
+        if (ranked.length) remember(ranked.slice(0,1));
       } catch (error) {
         if (error.status === 429) next = Date.now() + Math.max(60000, error.retryAfterMs ?? 0);
         throw error;

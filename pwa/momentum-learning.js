@@ -5,10 +5,10 @@ const horizon = 120000;
 const checkpoints = [15, 30, 60, 120, 300, 900, 3600];
 const expiry = seconds => seconds < 60 ? 12 : seconds === 60 ? 25 : seconds === 120 ? 75 : seconds === 300 ? 60 : 120;
 const keepLong = 20;
-const schemaVersions = new Set([1,2]);
+const schemaVersions = new Set([1,2,3]);
 const maxSamplesPerHorizon = 240;
 const maxModels = 10;
-const sampleId = row => `${row.type}:${row.key}:${row.horizon ?? 120}:${row.observedAt ?? row.at}`;
+const sampleId = row => `${row.type}:${row.key}:${row.horizon ?? 120}:${row.observedAt ?? row.at}:${Boolean(row.executable)}`;
 const maxPending = 96;
 
 const keyOf = ({ token, pool }) => `${token}:${pool}`;
@@ -24,7 +24,7 @@ function trimSamples(rows) {
     grouped.get(key).push(row);
   }
   return [...grouped.values()].flatMap(rows => {
-    const vetted = rows.filter(row => row.verified && row.calibratable).slice(-80);
+    const vetted = rows.filter(row => row.executable && row.verified && row.calibratable).slice(-80);
     return [...new Map([...vetted, ...rows.slice(-(maxSamplesPerHorizon - vetted.length))]
       .map(row => [sampleId(row), row])).values()];
   }).sort((a,b) => a.at-b.at);
@@ -39,8 +39,12 @@ export function mergeLearning(previous, next, now = Date.now()) {
   if (!schemaVersions.has(previous?.version)) return next;
   const samples = trimSamples([...new Map([...previous.samples, ...next.samples].map(row =>
     [sampleId(row), row])).values()]);
-  const lastLabel = new Map();
+  const lastLabel = new Map(), completedVirtual = new Set();
   for (const row of samples) if (row.type === "shadow") {
+    if (row.executable) {
+      completedVirtual.add(`${row.key}:${row.observedAt}`);
+      continue;
+    }
     const previous = lastLabel.get(row.key);
     const observedAt = row.observedAt ?? row.at;
     if (!previous || observedAt > previous.at || observedAt === previous.at && (row.horizon ?? 120) > previous.horizon)
@@ -52,10 +56,11 @@ export function mergeLearning(previous, next, now = Date.now()) {
       const remaining = (row.remaining ?? [120]).filter(seconds =>
         (!labelled || row.at > labelled.at || row.at === labelled.at && seconds > labelled.horizon) &&
         now - row.at <= (seconds + expiry(seconds))*1000);
-      return remaining.length ? [{ ...row, remaining }] : [];
+      return remaining.length ? [{ ...row, remaining,
+        virtualDone:row.virtualDone || completedVirtual.has(`${keyOf(row)}:${row.at}`) }] : [];
     }).sort((a,b) => a.at-b.at).slice(-maxPending);
-  return { version: 2, samples, pending, paperKeys: [...new Set([...previous.paperKeys, ...next.paperKeys])].slice(-200),
-    models: mergeModels(previous.models ?? [],next.models ?? []) };
+  return { version: 3, samples, pending, paperKeys: [...new Set([...previous.paperKeys, ...next.paperKeys])].slice(-200),
+    models: mergeModels(previous.version===3 ? previous.models ?? [] : [],next.models ?? []) };
 }
 
 export function paperLearning(snapshot, policy) {
@@ -70,7 +75,7 @@ export function paperLearning(snapshot, policy) {
   const slipFloor = policy.slippageBps / 10000;
   let generation = 0;
   let savedGeneration = 0;
-  let models = snapshot?.models?.slice(-maxModels) ?? [];
+  let models = snapshot?.version===3 ? snapshot.models?.slice(-maxModels) ?? [] : [];
   let lastTraining = 0;
   let lastModelSignature = JSON.stringify(models.at(-1)?.weights ?? {});
   const rollback = policy.momentumRollback === 1;
@@ -90,15 +95,60 @@ export function paperLearning(snapshot, policy) {
       sample.verified = safe;
       generation++;
     },
+    routeWanted(market, now) {
+      const row=pending.get(keyOf(market));
+      return Boolean(row?.missed && row.verified && row.calibratable && !row.virtualEntry && now-row.at<=15000);
+    },
+    proveRoute(market, proof, at) {
+      const row=pending.get(keyOf(market));
+      const positiveInteger=value=>typeof value==="string" && /^[1-9]\d{0,19}$/.test(value);
+      if (!row?.verified || !row.calibratable || row.virtualEntry || !(at >= row.at && at-row.at <= 15000) ||
+          !(proof?.quoteUsd > 0) || !(proof.entrySlip>=0 && proof.entrySlip<=.01) ||
+          !positiveInteger(proof.inLamports) || !positiveInteger(proof.tokenRaw)) return;
+      row.virtualEntry={...proof,at};
+      generation++;
+    },
+    virtualDue(now) {
+      return [...pending.values()].filter(row=>row.virtualEntry && !row.virtualDone &&
+        now-row.virtualEntry.at>=horizon && now-row.virtualEntry.at<=horizon+20000)
+        .sort((a,b)=>a.virtualEntry.at-b.virtualEntry.at);
+    },
+    finishVirtual(market, quote, at, solUsd) {
+      const row=pending.get(keyOf(market)), entry=row?.virtualEntry;
+      if (!entry || row.virtualDone || at-entry.at<horizon || at-entry.at>horizon+20000) return false;
+      row.virtualDone=true;
+      generation++;
+      // Route outputs already incorporate pool fees and price impact. Apply
+      // the quoted slippage allowance and local fee budget conservatively.
+      if (!quote?.allowed || !(solUsd>0) || !/^\d{1,20}$/.test(quote.lamports??"")) return false;
+      const quoted=Number(quote.lamports), minimum=Number(quote.minLamports);
+      const sellSlip=Math.max(slipFloor,.01);
+      const proceeds=Math.min(quoted*(1-sellSlip),minimum>0?minimum:Infinity)*solUsd*(1-feeFloor);
+      const cost=Number(entry.inLamports)*entry.quoteUsd*(1+Math.max(slipFloor,entry.entrySlip))*(1+feeFloor);
+      if (!(proceeds>0 && cost>0 && Number.isFinite(proceeds/cost))) return false;
+      append({type:"shadow", executable:true, key:keyOf(market), track:row.track, score:row.score, calibratable:true,
+        verified:true,features:row.features,segment:row.segment,observedAt:row.at,horizon:120,missed:row.missed,
+        net:proceeds/cost-1,at});
+      return true;
+    },
     observe(market, now, track, score, calibratable, verified = false, context = {}) {
+      const key=keyOf(market);
+      const previous=pending.get(key);
       if (!allowedTracks.has(track) || !Number.isFinite(score) || !Number.isFinite(market.price) ||
           market.price <= 0 || market.liquidity < policy.minLiquidity || !(market.liquidity > 0) ||
-          !Number.isFinite(now) || pending.has(keyOf(market)) || pending.size >= maxPending) return;
+          !Number.isFinite(now) || previous && (!calibratable || previous.calibratable || now<=previous.at)) return;
       // At most one sample per pool per horizon, including after an app reload.
-      if (samples.some(s => s.type === "shadow" && s.key === keyOf(market) && (s.observedAt ?? s.at) + horizon > now)) return;
+      if (samples.some(s => s.type === "shadow" && s.key === key && (!calibratable || s.calibratable) &&
+          (s.observedAt ?? s.at)+horizon>now)) return;
+      if (!previous && pending.size >= maxPending) {
+        if (!calibratable) return;
+        const weak = [...pending].find(([,row])=>!row.calibratable && !row.virtualEntry);
+        if (!weak) return;
+        pending.delete(weak[0]);
+      }
       const long = calibratable && [...pending.values()].filter(row => row.remaining.some(seconds=>seconds>=900)).length < keepLong;
       const { token, pool, price, liquidity } = market;
-      pending.set(keyOf(market), { token, pool, price, liquidity, at: now, track, score, calibratable, verified, ...context, remaining: long ? [...checkpoints] : checkpoints.slice(0,5) });
+      pending.set(key, { token, pool, price, liquidity, at: now, track, score, calibratable, verified, ...context, remaining: long ? [...checkpoints] : checkpoints.slice(0,5) });
       generation++;
     },
     due(now) {
@@ -159,16 +209,17 @@ export function paperLearning(snapshot, policy) {
       for (const track of allowedTracks) {
         const recent = samples.filter(s => s.track === track && s.at >= now - 86400000 && s.at <= now);
         const paper = recent.filter(s => s.type === "paper");
-        // Lower only on repeated net-positive moves near the entry floor. Unfilled
-        // quotes are evidence about price movement; they never prove execution.
         const shadow = [...new Map(recent.filter(s =>
-          s.type === "shadow" && (s.horizon ?? 120) === 120 && s.calibratable && s.verified && s.score >= anchor - 8 && s.score < anchor + 4
-        ).map(s => [s.key, s])).values()];
+          s.type === "shadow" && s.executable && s.horizon === 120 && s.calibratable && s.verified &&
+          s.score >= anchor - 8 && s.score < anchor + 4
+        ).map(s => [s.key, s])).values()].sort((a,b)=>a.at-b.at);
         const mean = rows => rows.reduce((sum,row) => sum + Math.max(-.15, Math.min(.15, row.net)), 0) / rows.length;
         const wins = rows => rows.filter(s => s.net > 0).length / rows.length;
+        const split = Math.floor(shadow.length*2/3);
+        const supported = condition => shadow.length>=18 && condition(shadow.slice(0,split)) && condition(shadow.slice(split));
         const offset = paper.length >= 12 && mean(paper) < -.005 ? 6
-          : shadow.length >= 18 && mean(shadow) < -.01 ? 3
-          : shadow.length >= 18 && wins(shadow) >= .65 && mean(shadow) > .02 ? -4 : 0;
+          : supported(rows=>mean(rows)<-.01) ? 3
+          : supported(rows=>wins(rows)>=.65 && mean(rows)>.02) ? -4 : 0;
         tracks[track] = { threshold: scoreBand(anchor, anchor + offset), shadow: shadow.length, paper: paper.length };
       }
       if (!rollback && now - lastTraining >= 300000) {
@@ -189,16 +240,17 @@ export function paperLearning(snapshot, policy) {
         row.threshold = scoreBand(anchor,anchor + (model.settings?.[track] ?? 0));
       }
       const checkpointCounts = {};
-      for (const row of samples) if (row.type === "shadow") checkpointCounts[row.horizon ?? 120] = (checkpointCounts[row.horizon ?? 120] ?? 0) + 1;
+      for (const row of samples) if (row.type === "shadow" && !row.executable) checkpointCounts[row.horizon ?? 120] = (checkpointCounts[row.horizon ?? 120] ?? 0) + 1;
       return { tracks, weights: model?.weights ?? {}, modelRevision: model?.id ?? "baseline", rollback,
         versions: models.length, checkpointCounts,
-        missed: samples.filter(row => row.type === "shadow" && row.horizon === 120 && row.missed && row.verified && row.calibratable && row.net > 0).length,
+        missed: samples.filter(row => row.type === "shadow" && row.executable && row.missed && row.net > 0).length,
+        executable: samples.filter(row=>row.executable).length,
         shadow: samples.filter(s => s.type === "shadow").length,
         paper: samples.filter(s => s.type === "paper").length, pending: pending.size };
     },
     get dirty() { return generation !== savedGeneration; },
     get generation() { return generation; },
     saved(version) { savedGeneration = version; },
-    snapshot: () => ({ version: 2, samples: trimSamples([...samples]), pending: [...pending.values()], paperKeys: [...paperKeys], models })
+    snapshot: () => ({ version: 3, samples: trimSamples([...samples]), pending: [...pending.values()], paperKeys: [...paperKeys], models })
   };
 }

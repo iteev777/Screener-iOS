@@ -106,7 +106,8 @@ export function applyPaperFill(book, order, tick, settings) {
   let realizedPnl = null;
   const openedAt = book.openedAt;
   const quantity = buy ? order.usd * (1 - fee) / (price * (1 + slip)) : Math.min(order.sol, book.sol);
-  const fill = price * (1 + (buy ? slip : -slip));
+  const modeled = price * (1 + (buy ? slip : -slip));
+  const fill = !buy && tick.exitQuote?.price > 0 ? Math.min(modeled,tick.exitQuote.price) : modeled;
   if (buy) {
     const day = Math.floor(at / 86400000);
     book.buysToday = (book.buyDay === day ? book.buysToday ?? 0 : 0) + 1;

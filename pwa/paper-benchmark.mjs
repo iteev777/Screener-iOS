@@ -48,11 +48,18 @@ let learned;
 const learningChanges = [];
 let learningKey;
 const stages = new Map();
+const phases = ["discovery","pool-identification","price","market-analysis","safety","signal","route-check",
+  "paper-entry","position","paper-exit","learning"];
+const attempts = new Map();
+const completions = new Map();
+const sourceDiagnostics = new Map();
 const uniqueFound = new Set();
 const uniqueAnalyzed = new Set();
 const uniqueApproved = new Set();
 const uniqueRejected = new Set();
 const outcomes = new Map();
+const trace = process.env.SCREENER_BENCH_TRACE;
+const lastDiagnostic = trace ? new Map() : null;
 const calibration = new Map();
 const closed = [];
 const positionResults = new Map();
@@ -68,6 +75,7 @@ const equity = () => book.cash + Object.values(book.positions).reduce((sum, row)
 function recordPaper() {
   const newCount = (book.totalTrades ?? 0) - processed;
   for (const trade of book.trades.slice(0, newCount).reverse()) {
+    if (trace) appendFileSync(trace,JSON.stringify({event:"fill",...trade})+"\n");
     fees += trade.feeUsd;
     const buy = trade.side === "Osto";
     if (buy) buys++; else sells++;
@@ -88,6 +96,18 @@ function recordPaper() {
   maxDrawdown = Math.max(maxDrawdown, (peakEquity - value) / peakEquity);
 }
 const log = value => console.log(JSON.stringify(value));
+function funnel() {
+  let progressed;
+  return phases.map(phase=>{
+    const attempted=attempts.get(phase) ?? new Set();
+    const passed=completions.get(phase) ?? new Set();
+    const fromPrevious=progressed?.size ?? attempted.size;
+    const completed=progressed ? new Set([...passed].filter(token=>progressed.has(token))) : passed;
+    progressed=completed;
+    return {phase,attempted:attempted.size,passed:passed.size,fromPrevious,completed:completed.size,
+      passRate:fromPrevious ? completed.size/fromPrevious : null};
+  });
+}
 try {
   await runScanner({ engine, policy, timeframe: "1m", signal: controller.signal, load: async () => book,
     commit: async (ticks, decide, eligible) => {
@@ -96,10 +116,32 @@ try {
       return book;
     },
     saveLearning: async state => { learned = state; },
-    diagnostic({ token, stage, outcome, reason, score, strategyCode }) {
+    diagnostic({ token, stage, outcome, reason, score, strategyCode, provider }) {
+      if (trace) {
+        const key=`${token}:${stage}`, value=`${outcome}:${reason??""}:${provider??""}`;
+        if (lastDiagnostic.get(key)!==value) {
+          if (lastDiagnostic.size>=24000) lastDiagnostic.delete(lastDiagnostic.keys().next().value);
+          lastDiagnostic.set(key,value);
+          appendFileSync(trace,JSON.stringify({event:"stage",at:Date.now(),token,stage,outcome,reason,score,strategyCode,provider})+"\n");
+        }
+      }
+      if (phases.includes(stage)) {
+        if (!attempts.has(stage)) attempts.set(stage,new Set());
+        attempts.get(stage).add(token);
+        if (outcome==="approve") {
+          if (!completions.has(stage)) completions.set(stage,new Set());
+          completions.get(stage).add(token);
+        }
+      }
+      if (provider && ["price","pool-identification"].includes(stage)) {
+        const key=`${stage}/${outcome} · ${provider}`;
+        if (!sourceDiagnostics.has(key)) sourceDiagnostics.set(key,new Set());
+        sourceDiagnostics.get(key).add(token);
+      }
       if (["momentum","market","liquidity","mint","rug","pool","route","eligible"].includes(stage)) uniqueAnalyzed.add(token);
       if (stage === "eligible" && outcome === "approve") uniqueApproved.add(token);
-      if (outcome === "reject") uniqueRejected.add(token);
+      if (outcome === "reject" && ["market","momentum","liquidity","mint","rug","pool","route","portfolio"].includes(stage))
+        uniqueRejected.add(token);
       const bucket = `${stage}/${outcome}`;
       if (!stages.has(bucket)) stages.set(bucket, new Set());
       stages.get(bucket).add(token);
@@ -129,7 +171,7 @@ try {
       maxQueue = Math.max(maxQueue, stats.queued);
       if (Date.now() >= next) {
         next = Date.now() + 60000;
-        log({ seconds: Math.floor((Date.now() - started) / 1000), ...stats, totalPump });
+        log({ seconds: Math.floor((Date.now() - started) / 1000), ...stats, totalPump, funnel:funnel() });
       }
     }
   });
@@ -148,8 +190,16 @@ if (process.env.SCREENER_BENCH_LEARNING && learned) {
   writeFileSync(process.env.SCREENER_BENCH_LEARNING, JSON.stringify(learned, null, 2) + "\n");
 }
 log({ final: true, strategy, seconds: (Date.now() - started) / 1000, last, totalPump, peakWorkers, maxQueue,
+  funnel:funnel(), sourceDiagnostics:Object.fromEntries([...sourceDiagnostics].map(([key,tokens])=>[key,tokens.size])),
   stages: Object.fromEntries([...stages].map(([key, tokens]) => [key, tokens.size])),
   topReasons: [...outcomes].map(([key, tokens]) => [key, tokens.size]).sort((a, b) => b[1] - a[1]).slice(0, 30),
+  reasonsByStage:Object.fromEntries([...outcomes].reduce((grouped,[key,tokens])=>{
+    const split=key.indexOf(": ");
+    const bucket=key.slice(0,split);
+    if (!grouped.has(bucket)) grouped.set(bucket,[]);
+    grouped.get(bucket).push([key.slice(split+2),tokens.size]);
+    return grouped;
+  },new Map()).entries()),
   thresholds: Object.fromEntries([70, 72, 76, 80, 84, 88].map(threshold =>
     [threshold, [...calibration.values()].filter(score => score >= threshold).length])),
   uniqueFound: uniqueFound.size, uniqueAnalyzed: uniqueAnalyzed.size, uniqueApproved: uniqueApproved.size, uniqueRejected: uniqueRejected.size,

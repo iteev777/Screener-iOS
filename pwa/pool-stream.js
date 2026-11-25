@@ -56,7 +56,7 @@ export function poolStream(signal, changed, status) {
         const pool = message.method === "logsNotification" && subscriptions.get(message.params?.subscription);
         const notification = message.params?.result;
         if (pool && desired.has(pool) && Number.isSafeInteger(notification?.context?.slot) &&
-            notification?.value?.err === null) changed(pool);
+            notification?.value?.err === null) changed(pool, notification);
       } catch { /* Ignore malformed provider frames. */ }
     };
     peer.onclose = () => {

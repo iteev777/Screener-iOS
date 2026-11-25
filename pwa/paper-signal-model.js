@@ -21,7 +21,7 @@ export function signalFeatures(market, window) {
     Math.max(0, Math.min(1, (number - floor) / width)) : null;
   return {
     buying: normalize(window?.pressure ?? (count > 0 ? tape.buys / count : undefined), 0, 1),
-    pace: normalize(market.volumeHour > 0 ? (market.volume5 * 12 / market.volumeHour) : undefined, 0, 3),
+    pace: normalize(window?.pace ?? (market.volumeHour > 0 ? market.volume5 * 12 / market.volumeHour : undefined),0,3),
     move: normalize(window?.move ?? market.change5, -5, 10),
     liquidity: normalize(Math.log10(market.liquidity), 3, 3)
   };
@@ -31,7 +31,7 @@ export function fitSignalWeights(samples, now) {
   const groups = new Map();
   for (const row of samples) {
     if (!row.features || !row.segment || row.at > now || row.at < now - 86400000 ||
-        (row.type !== "paper" && !(row.horizon === 120 && row.verified && row.calibratable))) continue;
+        (row.type !== "paper" && !(row.executable && row.horizon === 120 && row.verified && row.calibratable))) continue;
     const cohort = `${row.type}/${row.track}/${row.segment}`;
     if (!groups.has(cohort)) groups.set(cohort, []);
     groups.get(cohort).push(row);

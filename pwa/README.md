@@ -168,3 +168,21 @@ Tuoreita poolihintoja tallennetaan saatavuuden mukaan 15, 30, 60, 120, 300, 900 
 Ostopaineen, volyymitahdin, hintaliikkeen ja likviditeetin yhteyttä kustannuskorjattuun nettotulokseen arvioidaan erikseen tokenin iän, tuntitrendin ja signaalipolun mukaan. Toteutuneet Paper-positiot ja hintaseuranta käytetään eri ryhmissä. Hintaseurantalabeli voi ohjata mallia vasta mintti- ja RugCheck-tarkistusten jälkeen. Painon muutoksen hyväksyntä vaatii vähintään 36 eri poolin aineiston ja saman suuntaisen vaikutuksen kronologisessa tarkistusaineistossa. Painojen vaikutus signaaliin rajataan neljään pisteeseen, ja turvallisuus- sekä pääomaportit suoritetaan edelleen ennen ostoa.
 
 Paper-oppimisesta säilytetään kymmenen viimeisintä strategiamallia. Asetuksen **Edellinen tallennettu malli tai lähtöasetukset** voi ottaa käyttöön pysäytetyssä Paper-tilassa. Se lukitsee edellisen mallin käytön. Havaintoja voi edelleen kertyä, ja valinta tallentuu sovelluksen asetuksiin. GeckoTerminalin pooli- ja kauppahaut jakavat pyyntötahtinsa ja yhteisen kiintiötaukonsa.
+
+#### Poolin tunnistus, toteutustarjoukset ja vaiheloki
+
+Momentum erottaa listauksesta puuttuvan poolin, puuttuvan USD-hinnan, puuttuvan likviditeetin, nollahinnan, nollareservin ja vanhentuneen noteerauksen. DEX Screenerin quote-puolen tokenille voidaan laskea USD-hinta vain samassa vastauksessa annetusta base-hinnasta ja parin hintasuhteesta. USD-kynttilöitä ei käännetä tämän perusteella. Jupiterin tokenihaku antaa pooliehdokkaita. Pooliehdokkaan tokenpari varmistetaan GeckoTerminalin vastauksesta. Jupiterin tokenitason likviditeettiä ei käsitellä tietyn poolin likviditeettinä.
+
+PumpPortalista saatua bonding curve -osoitetta verrataan mintille johdettuun kanoniseen osoitteeseen. Solana RPC:n vahvistettu tilannekuva antaa mintin desimaalit, vastavaluutan ja reservit. USD-noteeraus saadaan mitatusta SOL- tai USDC-hinnasta. Likviditeetti perustuu oikeaan myyntivastavaluutan reserviin. SOL-curvejen tarkkailussa voidaan lisäksi käyttää Pump-ohjelman vahvistettuja TradeEvent-lokeja. GeckoTerminalin ja RPC:n kauppatapahtumia ei lasketa yhteen samalta poolilta. Token-2022-mintti voi edetä riskitarkistukseen, kun minttaus- ja jäädytysvaltuudet puuttuvat ja ainoat ilmoitetut laajennukset koskevat metadataa. RugCheck ja poolin tarkistus tehdään normaalisti.
+
+Jupiterin read-only-esitarkistus käynnistyy lupaavalle signaalille rinnakkain muiden turvallisuustarkistusten kanssa. Paper-ostoon vaaditaan kaikki tarkistukset, soveltuva poolisyvyys, vahvistettu mintin desimaali ja poolin hintaa vastaava kaksisuuntainen tarjous. Automaattinen Paper-myynti odottaa kyseiselle määrälle saadun tuoreen Jupiter-tarjouksen. Epäonnistuneessa myynnissä positiota merkitään edelleen tuoreella markkinahinnalla. Toteutunut Paper-myynti käyttää enintään tarjouksen ja liukuman mukaista hintaa.
+
+Hintaseuranta pitää aiemmat markkinahavainnot tallessa. Koulutusdataksi kelpaa suljetun Paper-position nettotulos tai turvallisuustarkistetun ehdokkaan vastaava virtuaalinen havainto. Virtuaalinen havainto vaatii pyyntöhetken osto- ja myyntireitit sekä 120 sekunnin kohdalla tarkan tokenimäärän uuden myyntitarjouksen. Virtuaalinen seuranta ei muuta Paper-saldoa. Hintamerkit ilman näitä tarjouksia säilyvät diagnostiikassa. Pistekynnyksen ja painojen mukautus tarkistetaan erillisessä kronologisessa aineistossa.
+
+Sama Paper-ajo tuottaa vaiheiden läpäisyt ja syyt. Valinnainen trace-tiedosto kirjaa tokenkohtaiset vaiheiden muutokset ja toteumat.
+
+```sh
+SCREENER_BENCH_SECONDS=3605 SCREENER_BENCH_LEARNING=/tmp/paper-learning.json \
+  SCREENER_BENCH_TRACE=/tmp/paper-stage-trace.jsonl \
+  node --use-env-proxy pwa/paper-benchmark.mjs > /tmp/paper-funnel.jsonl
+```

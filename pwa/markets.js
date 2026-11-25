@@ -10,13 +10,46 @@ export const timeframes = Object.freeze({ "1m": ["minute", 1, 60], "5m": ["minut
 export function normalizePair(pair) {
   if (pair?.chainId !== "solana" || !address.test(pair.baseToken?.address ?? "") ||
       !address.test(pair.pairAddress ?? "")) return;
-  const price = Number(pair.priceUsd);
-  const liquidity = pair.liquidity?.usd;
+  const price = marketNumber(pair.priceUsd);
+  const liquidity = marketNumber(pair.liquidity?.usd);
   if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(liquidity) || liquidity <= 0) return;
   return { token: pair.baseToken.address, pool: pair.pairAddress, quoteToken: pair.quoteToken?.address,
     symbol: String(pair.baseToken.symbol ?? "").slice(0, 18), price, liquidity,
     name: pair.baseToken?.name, volume5: pair.volume?.m5, volumeHour: pair.volume?.h1,
     change5: pair.priceChange?.m5, changeHour: pair.priceChange?.h1, marketCap: pair.marketCap, volume: pair.volume?.h24, change: pair.priceChange?.h24, transactions: pair.txns, created: pair.pairCreatedAt };
+}
+
+export function marketNumber(value) {
+  return (typeof value === "number" || typeof value === "string" && value.trim()) &&
+    Number.isFinite(Number(value)) ? Number(value) : undefined;
+}
+
+// A pair endpoint reports USD for its base. A quote-side USD price can be
+// recovered only when the same response gives its base price in quote units.
+export function orientPair(pair, token) {
+  if (pair?.baseToken?.address === token) return pair;
+  if (pair?.quoteToken?.address !== token || !address.test(pair.baseToken?.address ?? "")) return;
+  const native = marketNumber(pair.priceNative);
+  const price = marketNumber(pair.priceUsd);
+  const swapSides = row => ({ buys: row?.sells, sells: row?.buys });
+  return { ...pair, baseToken: pair.quoteToken, quoteToken: pair.baseToken,
+    priceUsd: marketNumber(pair.quotePriceUsd) ?? (native > 0 && price >= 0 ? price / native : undefined),
+    priceNative: native > 0 ? 1 / native : undefined, priceChange: pair.quotePriceChange,
+    txns: Object.fromEntries(Object.entries(pair.txns ?? {}).map(([window, row]) => [window, swapSides(row)])),
+    marketCap: undefined, fdv: undefined };
+}
+
+export function pairState(raw) {
+  if (raw?.chainId !== "solana" || !address.test(raw.baseToken?.address ?? "") ||
+      !address.test(raw.quoteToken?.address ?? "") || !address.test(raw.pairAddress ?? "") ||
+      raw.baseToken.address === raw.quoteToken.address) return "invalid-pair";
+  const price = marketNumber(raw.priceUsd), liquidity = marketNumber(raw.liquidity?.usd);
+  if (price === 0) return "zero-price";
+  if (liquidity === 0) return "empty-liquidity";
+  if (price === undefined) return "missing-price";
+  if (liquidity === undefined) return "missing-liquidity";
+  if (price < 0 || liquidity < 0) return "invalid-values";
+  return "priced";
 }
 
 export async function searchMarkets(query, bounds, signal) {

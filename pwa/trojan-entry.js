@@ -30,6 +30,33 @@ export function routeQuality(quote) {
     reason: impact > 3 ? "Jupiter-hintavaikutus yli 3 %" : score < 55 ? "Jupiter-reittipisteet alle 55" : "Jupiter-reitti hyväksytty" };
 }
 
+function quoteRequest({ signal, apiKey, slippageBps, requestQuote }) {
+  const headers = apiKey ? { "x-api-key": apiKey } : {};
+  return async (inputMint, outputMint, quantity, extra = {}) => {
+    const query = new URLSearchParams({ inputMint, outputMint, amount:quantity, slippageBps, ...extra });
+    const quote = await requestQuote(() => fetchJson(`${endpoint}?${query}`, {headers}, signal));
+    const out = integer(quote?.outAmount);
+    const min = quote?.otherAmountThreshold == null && out !== null
+      ? out * BigInt(10000-slippageBps)/10000n : integer(quote?.otherAmountThreshold);
+    if (quote?.inputMint !== inputMint || quote.outputMint !== outputMint || integer(quote.inAmount) !== quantity ||
+        out === null || min === null || min <= 0n || min > out || min < out*BigInt(10000-slippageBps)/10000n) {
+      const error = new Error(quote?.errorMessage ?? "Jupiter-tarjous ei vastaa pyyntöä");
+      throw error;
+    }
+    return {quote,out};
+  };
+}
+
+export async function analyzeCounterfactualExit(token, amount, {signal,apiKey,requestQuote}) {
+  const quantity=integer(amount);
+  if (!address.test(token) || token === mint || !quantity) throw new Error("Virheellinen Jupiter-myyntitarjous");
+  const request=quoteRequest({signal,apiKey,slippageBps:100,requestQuote});
+  const {quote,out}=await request(token,mint,quantity);
+  const quality=routeQuality(quote);
+  if (quote.transaction || !quality.allowed) return {allowed:false,reason:quality.reason};
+  return {allowed:true,lamports:out.toString(),impact:quality.impact,minLamports:integer(quote.otherAmountThreshold)?.toString()};
+}
+
 export async function analyzeEntryRoute(token, usd, { signal, apiKey, taker, slippageBps = 100, solUsd, checkExit = false, requestQuote = work => work() } = {}) {
   if (!address.test(token) || token === mint || !(usd > 0) || !Number.isFinite(usd) ||
       !Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > 100) throw new Error("Virheellinen Jupiter-ostopyyntö");
@@ -37,25 +64,13 @@ export async function analyzeEntryRoute(token, usd, { signal, apiKey, taker, sli
   const price = solUsd ?? (await currentMarket(signal)).price;
   const amount = Math.round(usd / price * 1e9);
   if (!Number.isSafeInteger(amount) || amount < 1) throw new Error("Virheellinen WSOL-ostomäärä");
-  const headers = apiKey ? { "x-api-key": apiKey } : {};
-  const request = async (extra, inputMint = mint, outputMint = token, quantity = BigInt(amount)) => {
-    const query = new URLSearchParams({ inputMint, outputMint, amount: quantity, slippageBps, ...extra });
-    const quote = await requestQuote(() => fetchJson(`${endpoint}?${query}`, { headers }, signal));
-    const out = integer(quote?.outAmount);
-    const min = quote?.otherAmountThreshold == null && out !== null
-      ? out * BigInt(10000 - slippageBps) / 10000n : integer(quote?.otherAmountThreshold);
-    if (quote?.inputMint !== inputMint || quote.outputMint !== outputMint || integer(quote.inAmount) !== quantity ||
-        out === null || min === null || min <= 0n || min > out || min < out * BigInt(10000 - slippageBps) / 10000n) {
-      throw new Error("Jupiter-tarjous ei vastaa pyyntöä");
-    }
-    return { quote, out };
-  };
-  const { quote, out } = await request({});
+  const request = quoteRequest({signal,apiKey,slippageBps,requestQuote});
+  const { quote, out } = await request(mint,token,BigInt(amount));
   if (quote.transaction) throw new Error("Jupiter palautti odottamattoman transaktion");
   const quality = routeQuality(quote);
   if (!quality.allowed) return quality;
   if (checkExit) {
-    const reverse = await request({}, token, mint, out);
+    const reverse = await request(token,mint,out);
     if (reverse.quote.transaction || !routeQuality(reverse.quote).allowed) {
       return { ...quality, allowed: false, reason: "Jupiterin myyntireitti hylättiin" };
     }
@@ -65,9 +80,11 @@ export async function analyzeEntryRoute(token, usd, { signal, apiKey, taker, sli
     }
     quality.reason += " · Myyntireitti tarkistettu";
     quality.roundTripBps = Number(loss / BigInt(amount));
+    quality.proof = {inLamports:String(amount), tokenRaw:out.toString(), quoteUsd:price,
+      entrySlip:slippageBps/10000};
   }
   if (!taker) return { ...quality, simulation: "skipped" };
-  const { quote: simulatedQuote, out: simulatedOut } = await request({ taker });
+  const { quote: simulatedQuote, out: simulatedOut } = await request(mint,token,BigInt(amount),{ taker });
   if (!routeQuality(simulatedQuote).allowed ||
       (simulatedOut > out ? simulatedOut - out : out - simulatedOut) * 10000n > out * BigInt(slippageBps)) {
     return { ...quality, allowed: false, reason: "Jupiter-simulaation tuotto poikkeaa tarjouksesta" };

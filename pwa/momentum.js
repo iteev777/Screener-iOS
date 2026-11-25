@@ -115,7 +115,8 @@ export function shortMomentum(trades, now) {
     const buyers = w.filter(trade => trade.side === "buy");
     const identified = buyers.filter(trade => trade.trader);
     const distinctBuyers = identified.length === buyers.length ? new Set(identified.map(trade => trade.trader)).size : null;
-    windows[seconds] = w.length >= 3 ? { count:w.length, volume, spanMs:w.at(-1).at-w[0].at, distinctBuyers,
+    windows[seconds] = w.length >= 3 ? { count:w.length, buys:buyers.length, sells:w.length-buyers.length,
+      volume, spanMs:w.at(-1).at-w[0].at, distinctBuyers,
       pressure:w.filter(t=>t.side==="buy").reduce((n,t)=>n+t.usd,0)/volume,
       move:(w.at(-1).price/w[0].price-1)*100, high:Math.max(...w.map(t=>t.price)),
       low:Math.min(...w.map(t=>t.price)) } : null;
@@ -162,8 +163,15 @@ export function earlyMomentum(windows, market, quality, threshold, policy, previ
     return watch("short-flow", "Lyhyen ikkunan ostovirta tai kulujen jälkeinen liike ei riitä");
   const older = Math.max(0, context.volume - recent.volume);
   const pace = older > 0 ? recent.volume / older : null;
-  const score = Math.round(clamp(quality * .23 + recent.pressure * 30 + Math.min(activity, 3) * 7 +
+  // Evidence in young markets is measured in fills and present liquidity.
+  // A mature-market quality score includes 5m/1h/6h fields that do not exist yet.
+  const depth = clamp(Math.log2(market.liquidity / Math.max(1,policy.minLiquidity)),0,3);
+  const coverage = Math.min(100, quality * .45 + 29 + depth * 9 +
+    Math.min(4,recent.distinctBuyers ?? 0)*3);
+  const score = Math.round(clamp(coverage * .23 + recent.pressure * 30 + Math.min(activity, 3) * 7 +
     Math.min(recent.move / Math.max(1, estimatedCostPct), 4) * 5 + (pace > 1 ? 6 : 0), 0, 100));
+  if (windows[5]?.move < -estimatedCostPct && windows[5].pressure < .45)
+    return watch("short-reversal", "Viimeisten 5 sekunnin toteumat osoittavat myyntikäänteen", score);
   if (score < threshold) return watch("score", "Lyhyen ikkunan pisteraja ei täyty", score);
   return { decision:"approve", code:"early-flow", reason:`15 s ostovirta ${Math.round(recent.pressure*100)} % ja liike ${recent.move.toFixed(2)} %`, score, track:"early" };
 }

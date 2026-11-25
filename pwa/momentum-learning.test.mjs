@@ -13,9 +13,19 @@ test("learns from cost-adjusted future quotes and restores feedback across a res
   model = paperLearning(JSON.parse(JSON.stringify(model.snapshot())), defaults);
   assert.equal(model.mark({...market,pool:"p0", price:1.15}, now + 119000), false);
   assert.equal(model.due(now + 120000).length,15);
-  for (let i=0; i<18; i++) assert.equal(model.mark({...market,pool:`p${i}`, price:1.08}, now + 120000),true);
+  for (let i=0; i<18; i++) {
+    const candidate={...market,pool:`p${i}`};
+    model.proveRoute(candidate,{inLamports:"100000000",tokenRaw:"1000000",quoteUsd:100,entrySlip:.01},now+1000);
+    assert.equal(model.mark({...candidate,price:1.08},now+120000),true);
+  }
+  assert.equal(model.calibration(80,now+120000).tracks.early.threshold,80);
+  assert.equal(model.virtualDue(now+120000).length,0);
   model = paperLearning(model.snapshot(), defaults);
-  assert.deepEqual(model.calibration(80,now + 120000).tracks.early,{threshold:76,shadow:18,paper:0});
+  assert.equal(model.virtualDue(now+121000).length,18);
+  for (const candidate of model.virtualDue(now+121000)) {
+    assert.equal(model.finishVirtual(candidate,{allowed:true,lamports:"110000000"},now+121000,100),true);
+  }
+  assert.deepEqual(model.calibration(80,now + 121000).tracks.early,{threshold:76,shadow:18,paper:0});
   assert.equal(model.calibration(80,now + 120000).tracks.rolling.threshold,80);
 });
 
@@ -81,7 +91,7 @@ test("time-bounded observation records actual checkpoints without imputing skipp
     assert.equal(model.mark({...market,price:1.04},now+seconds*1000),true);
   }
   assert.deepEqual(model.snapshot().samples.map(row=>row.horizon),[15,30,60,120,300,900,3600]);
-  assert.equal(model.calibration(80,now+3600000).missed,1);
+  assert.equal(model.calibration(80,now+3600000).missed,0);
   assert.equal(model.snapshot().pending.length,0);
 });
 
@@ -89,7 +99,7 @@ test("feature weights are learned only with chronological holdout confirmation",
   const { fitSignalWeights, learnedScore } = await import("./paper-signal-model.js");
   const samples = Array.from({length:36},(_,i) => ({
     key:String(i), type:"shadow",track:"early",segment:"new/quiet", at:now+i, horizon:120, verified:true,
-    calibratable:true, features:{buying:i%2 ? .9 : .1}, net:(i%2 ? .05:-.04)
+    executable:true, calibratable:true, features:{buying:i%2 ? .9 : .1}, net:(i%2 ? .05:-.04)
   }));
   const fitted = fitSignalWeights(samples,now+40);
   assert.equal(fitted["shadow/early/new/quiet"].weights.buying,2);
@@ -102,7 +112,7 @@ test("feature weights are learned only with chronological holdout confirmation",
 
 test("rollback restores the previous model and disables promotion during evaluation", () => {
   const weights = {"shadow/early/new/quiet":{weights:{buying:2}}};
-  const model = paperLearning({version:2,samples:[],pending:[],paperKeys:[],models:[
+  const model = paperLearning({version:3,samples:[],pending:[],paperKeys:[],models:[
     {id:10,at:now-20000,settings:{early:-4},weights},
     {id:11,at:now-10000,settings:{early:6},weights:{}}
   ]},{...defaults,momentumRollback:1});
