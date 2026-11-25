@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Real read-only data, in-memory simulation. Requires Node 24+.
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { advancePortfolio, newPortfolio, runScanner } from "./scanner.js";
 import { defaults } from "./policy.js";
 import { candidateQuality, trojanDecision } from "./trojan-analysis.js";
@@ -44,6 +44,9 @@ let next = started;
 let totalPump = 0;
 let maxQueue = 0;
 let peakWorkers = 0;
+let learned;
+const learningChanges = [];
+let learningKey;
 const stages = new Map();
 const outcomes = new Map();
 const calibration = new Map();
@@ -81,6 +84,7 @@ try {
       recordPaper();
       return book;
     },
+    saveLearning: async state => { learned = state; },
     diagnostic({ token, stage, outcome, reason, score, strategyCode }) {
       const bucket = `${stage}/${outcome}`;
       if (!stages.has(bucket)) stages.set(bucket, new Set());
@@ -96,6 +100,13 @@ try {
     event: event => { if (event.status === "found" && event.reason === "PumpPortal") totalPump++; },
     telemetry(stats) {
       last = stats;
+      if (stats.learning) {
+        const key = Object.values(stats.learning.tracks).map(track => track.threshold).join("/");
+        if (key !== learningKey) {
+          learningChanges.push({seconds: Math.floor((Date.now()-started)/1000), ...stats.learning});
+          learningKey = key;
+        }
+      }
       peakWorkers = Math.max(peakWorkers, stats.peakWorkers);
       maxQueue = Math.max(maxQueue, stats.queued);
       if (Date.now() >= next) {
@@ -115,11 +126,15 @@ if (process.env.SCREENER_BENCH_PAIRS) {
     }) + "\n");
   }
 }
+if (process.env.SCREENER_BENCH_LEARNING && learned) {
+  writeFileSync(process.env.SCREENER_BENCH_LEARNING, JSON.stringify(learned, null, 2) + "\n");
+}
 log({ final: true, strategy, seconds: (Date.now() - started) / 1000, last, totalPump, peakWorkers, maxQueue,
   stages: Object.fromEntries([...stages].map(([key, tokens]) => [key, tokens.size])),
   topReasons: [...outcomes].map(([key, tokens]) => [key, tokens.size]).sort((a, b) => b[1] - a[1]).slice(0, 30),
   thresholds: Object.fromEntries([70, 72, 76, 80, 84, 88].map(threshold =>
     [threshold, [...calibration.values()].filter(score => score >= threshold).length])),
+  learningChanges, learnedSamples: learned?.samples.length ?? 0,
   trades: book.totalTrades ?? 0, closed: closed.length, open: Object.keys(book.positions).length,
   winRate: closed.length ? closed.filter(position => position.pnl > 0).length / closed.length : null,
   averageHoldMs: closed.length ? closed.reduce((sum, position) => sum + position.heldMs, 0) / closed.length : null,

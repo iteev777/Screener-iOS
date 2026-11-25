@@ -145,3 +145,16 @@ SCREENER_BENCH_SECONDS=3605 node --use-env-proxy pwa/paper-benchmark.mjs > /tmp/
 Testi raportoi analyysin vaiheet ja syyt. Mintti voi näkyä eri vaiheissa ja syissä, jos sen tiedot täydentyvät tai muuttuvat. Pisterajavertailu laskee ehdokkaat, jotka täyttivät muut momentumin ehdot. Se kuvaa pisterajan herkkyyttä ennen mintti-, RugCheck-, likviditeetti- ja reittitarkistuksia. Nettonoteeraus sisältää kassan ja avoimet positiot viimeisillä hinnoilla. Voittoprosentti ja pitoaika lasketaan kokonaan suljetuista positioista, osamyynnit mukaan lukien. Arvonalenema lasketaan simuloidun salkun noteeratuista huipuista.
 
 Aiemmasta 15 minuutin ajosta tallennetuilla 300 aidolla DEX-parivastauksella vanha ja uusi pisteytys päästivät kumpikin viisi rajan 80 läpi. Uuden pisteytyksen rajat 70, 72 ja 76 päästivät kukin seitsemän, raja 84 kolme ja raja 88 yhden. Kun uuden pisteytyksen viiden ehdokkaan mintit ja RugCheck tarkistettiin erikseen nykyisestä ketju- ja raporttidatasta, kaksi pysähtyi minttitarkistukseen ja kolme RugCheckiin. Pisteraja säilytettiin 80:ssä. Tämä testi ei käytä historiasta arvattuja RugCheck-tiloja tai oston jälkeistä tuottoa.
+
+### Lyhyen aikavälin Paper-signaali ja oppiminen
+
+Momentum käyttää kolmea arviointipolkua. Perinteinen polku lukee palvelun viiden minuutin jaksoa. Lyhyt polku käyttää saman poolin aikaleimattuja kauppoja. Varhaisen virtauksen polku voi arvioida hinnaltaan ja likviditeetiltään tunnetun poolin ennen viiden minuutin tietojen valmistumista. Se edellyttää mitattua ostovirtaa, riittävää dollarivolyymia ja mallinnetut kulut ylittävää hintaliikettä. Puuttuva aineisto merkitään odotukseksi. GeckoTerminalin kokonainen poolivastaus voi korvata puuttuvan DEX-noteerauksen. Ilmoitus uudesta datasta lyhentää uudelleenanalyysin odotusta, myös silloin kun ehdokas on jo analyysissä.
+
+Oppiminen käyttää suljettujen Paper-positioiden toteutunutta nettotulosta sekä saman poolin aikaisintaan kahden minuutin päästä saatua noteerausta. Hintaseurantahavaintoihin vähennetään kulut ja arvioitu liukuma. Tulokset tallennetaan IndexedDB:hen. Kolme polkua kalibroidaan erikseen käyttäjän pisterajan ympärillä. Pisterajaa voidaan laskea enintään neljä pistettä, kun vähintään 18 eri poolin pisterajan lähellä olevaa ja mintti- sekä RugCheck-tarkistettua havaintoa tukevat sitä. Riittävä tappiollinen aineisto voi nostaa rajaa enintään kuusi pistettä. Puuttuva hintadata ja turvallisuushylkäykset eivät kelpaa pisterajan laskemisen aineistoksi. Hintaseuranta ei ole toteutunut kauppa.
+
+Jokainen ostettava token tarvitsee edelleen tuoreen hinnan, riskirajan täyttävän likviditeetin, hyväksytyn mintti- ja RugCheck-tarkistuksen, varmennetun poolin sekä Jupiterin osto- ja myyntireitin. Paper-kirja soveltaa pääoma-, altistus-, tappio-, osto- ja jäähyrajoja sekä mallinnettua toteutusviivettä. Nopean signaalin position voi sulkea aikaisin, jos aikaleimattu lyhyen aikavälin kauppavirta osoittaa käänteen ja liike jää kulujen alle.
+
+```sh
+SCREENER_BENCH_SECONDS=3605 SCREENER_BENCH_LEARNING=/tmp/paper-learning.json \
+  node --use-env-proxy pwa/paper-benchmark.mjs > /tmp/paper-momentum-adaptive.jsonl
+```

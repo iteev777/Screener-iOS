@@ -1,5 +1,6 @@
 import { devnetBalance, newDevnetWallet, reconcileDevnet, submitDevnetMemo } from "./devnet.js";
 import { advancePortfolio, newPortfolio, runScanner, scanKey, scanPrices } from "./scanner.js";
+import { mergeLearning } from "./momentum-learning.js";
 import { reconcileLiveSignature, createLiveAdapter } from "./live-adapter.js";
 
 import { currentMarket, watchSlots } from "./network.js";
@@ -128,6 +129,18 @@ function stored(key, value) {
     const books = transaction.objectStore("books");
     const request = value === undefined ? books.get(key) : books.put(value, key);
     transaction.oncomplete = () => resolve(request.result);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
+function storePaperLearning(snapshot) {
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction("books", "readwrite");
+    const books = transaction.objectStore("books");
+    const key = "paper-momentum-learning";
+    const read = books.get(key);
+    read.onsuccess = () => books.put(mergeLearning(read.result, snapshot), key);
+    transaction.oncomplete = resolve;
     transaction.onabort = () => reject(transaction.error);
   });
 }
@@ -500,6 +513,8 @@ async function startScan() {
     byId("filter-reasons").replaceChildren();
     await runScanner({ engine, policy, rules: policy.strategy === 3 ? rules : null, timeframe,
       copyWallets: policy.strategy === 4 ? copyWallets : null, birdeyeKey, jupiterKey, simulationWallet, signal: controller.signal, load,
+      learningState: policy.strategy === 8 ? await stored("paper-momentum-learning") : undefined,
+      saveLearning: storePaperLearning,
       event(entry) {
         tokenResults.delete(entry.mint);tokenResults.set(entry.mint,entry);
         if(tokenResults.size>2000)tokenResults.delete(tokenResults.keys().next().value);
@@ -531,6 +546,10 @@ async function startScan() {
           return p;
         }));
         byId("monitor-summary").textContent = `PumpPortal ${stats.pump} · Työntekijät ${stats.activeWorkers}/${stats.adaptiveLimit} (max ${stats.workerLimit}) · Analyysi ${stats.averageAnalysisMs} ms/token · Löydöstä analyysiin ${stats.averageDiscoveryMs} ms`;
+        if (stats.learning) {
+          const { tracks, shadow, paper } = stats.learning;
+          byId("monitor-summary").textContent += ` · Momentum ${tracks.rolling.threshold}/${tracks.short.threshold}/${tracks.early.threshold} · hintaseuranta ${shadow} · suljetut Paper-positiot ${paper}`;
+        }
         const sources = [...stats.sources.map(source => [source.name, source.error || (source.busy ? "Haetaan" :
           source.count == null ? "Odottaa" : `Viime haussa ${source.count}`)]), ...Object.entries(stats.apis)];
         byId("monitor-sources").replaceChildren(...sources.map(([name, state]) => {

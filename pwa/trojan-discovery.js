@@ -196,7 +196,7 @@ export class CandidateQueue {
       .sort((a,b)=>rank(b)-rank(a)||a.due-b.due).slice(0, 30).map(item => { item.inFlight = true; return item; });
   }
 
-  finish(item, result, raw, now) {
+  finish(item, result, raw, now, retryDelay) {
     item.inFlight = false;
     if (!item.attempts) this.stats.analyzed++;
     if (result === "approve" && !item.approved) { this.stats.approved++; item.approved = true; }
@@ -205,7 +205,9 @@ export class CandidateQueue {
     item.decision = result;
     item.attempts++;
     item.priority = raw ? candidateQuality(raw, item.sources, now).score : 0;
-    item.due = now + (result === "watch" ? 10000 : result === "approve" ? 15000 : Math.min(180000,60000*item.streak));
+    item.due = now + (retryDelay ?? (result === "watch" ? 10000 : result === "approve" ? 15000 : Math.min(180000,60000*item.streak)));
+    if (result !== "reject" && item.wakeAt != null) item.due = Math.min(item.due, item.wakeAt);
+    delete item.wakeAt;
   }
 
   release(batch, now) {

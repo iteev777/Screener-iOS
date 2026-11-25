@@ -199,6 +199,21 @@ try {
   await page.evaluate(() => window.dispatchEvent(new Event("offline")));
   await page.locator("#status").getByText(/Verkkoyhteys katkesi/).waitFor();
   assert.equal(await page.locator("#stop").isDisabled(), true);
+  if (momentum) {
+    await page.waitForFunction(() => new Promise((resolve, reject) => {
+      const request = indexedDB.open("screener-paper");
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+        const read = db.transaction("books").objectStore("books").get("paper-momentum-learning");
+        read.onerror = () => reject(read.error);
+        read.onsuccess = () => {
+          db.close();
+          resolve(read.result?.samples.filter(sample => sample.type === "paper").length === 2);
+        };
+      };
+    }));
+  }
   await page.reload();
   await view(page, "positions");
   await page.locator("#scan-trades").getByText(/Myynti.*SECOND/).waitFor();

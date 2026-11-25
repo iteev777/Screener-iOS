@@ -95,6 +95,10 @@ export function momentumExit(book, tick, policy) {
     return exit(5, "Ensimmäinen Momentum-voittotavoite", partial / 100);
   if (book.profitTaken && move >= (policy.momentumFinalProfit ?? 15))
     return exit(5, "Jäljellä olevan osuuden voitto kotiutettu");
+  const liveFlow = tick.shortWindow;
+  if (["early", "short"].includes(book.track) && at >= 45000 && liveFlow?.spanMs >= 3000 &&
+      liveFlow.pressure < .42 && liveFlow.move < -.8 && move < costFloor)
+    return exit(9, "Tuore myyntivirta purki nopean Momentum-signaalin");
   if (weak && finite(short) && short < 0 && finite(buying) && buying < .45 && !confirmed)
     return exit(9, "Negatiivinen momentum ja kasvava myyntipaine");
 }
@@ -108,7 +112,7 @@ export function shortMomentum(trades, now) {
   for (const seconds of [5,15,30,60,300]) {
     const w = rows.filter(t => t.at > now-seconds*1000);
     const volume = w.reduce((n,t)=>n+t.usd,0);
-    windows[seconds] = w.length >= 3 ? { count:w.length, volume,
+    windows[seconds] = w.length >= 3 ? { count:w.length, volume, spanMs:w.at(-1).at-w[0].at,
       pressure:w.filter(t=>t.side==="buy").reduce((n,t)=>n+t.usd,0)/volume,
       move:(w.at(-1).price/w[0].price-1)*100, high:Math.max(...w.map(t=>t.price)),
       low:Math.min(...w.map(t=>t.price)) } : null;
@@ -128,6 +132,33 @@ export function momentumSignal(w, quality, threshold=80) {
   const breakout=d.move>0 && b.move>0 && a.move>0 && a.high>=d.high && acceleration>=1.5;
   const signal=breakout?"breakout":pullback?"pullback":early?"early":null;
   return {decision:signal && score>=threshold?"approve":"watch",code:signal??"weak-momentum",score};
+}
+
+// The early path uses only real trades and a priced pool. It can use a shorter
+// observation period when the first trade is too young for a complete longer window.
+export function earlyMomentum(windows, market, quality, threshold, policy, previousLiquidity) {
+  const recent = windows[15];
+  const context = windows[30];
+  const watch = (code, reason, score) => ({decision:"watch", code, reason, score, track:"early"});
+  if (!recent || !context || recent.spanMs < 3000 || context.spanMs < 5000)
+    return watch("short-data", "Lyhyen aikavälin todennettu kauppavirta puuttuu");
+  if (!(market.liquidity >= policy.minLiquidity) || !Number.isFinite(quality))
+    return watch("short-liquidity", "Poolin likviditeettitieto tai strategian laatu puuttuu");
+  if (Number.isFinite(previousLiquidity) && market.liquidity < previousLiquidity * .9)
+    return watch("short-depth-drop", "Poolin likviditeetti heikkeni tuoreiden havaintojen välillä");
+  const ticket = Math.min(policy.orderUsd, policy.momentumMaxUsd);
+  const impact = ticket / (market.liquidity / 2 + ticket);
+  const estimatedCostPct = (2 * (policy.feeBps / 10000 + Math.max(policy.slippageBps / 10000, impact))) * 100;
+  const activity = recent.volume / Math.max(ticket, market.liquidity * .004);
+  if (!(recent.move > estimatedCostPct) || recent.move > 12 || context.move < -.5 ||
+      recent.pressure < .60 || context.pressure < .54 || activity < 1)
+    return watch("short-flow", "Lyhyen ikkunan ostovirta tai kulujen jälkeinen liike ei riitä");
+  const older = Math.max(0, context.volume - recent.volume);
+  const pace = older > 0 ? recent.volume / older : null;
+  const score = Math.round(clamp(quality * .23 + recent.pressure * 30 + Math.min(activity, 3) * 7 +
+    Math.min(recent.move / Math.max(1, estimatedCostPct), 4) * 5 + (pace > 1 ? 6 : 0), 0, 100));
+  if (score < threshold) return watch("score", "Lyhyen ikkunan pisteraja ei täyty", score);
+  return { decision:"approve", code:"early-flow", reason:`15 s ostovirta ${Math.round(recent.pressure*100)} % ja liike ${recent.move.toFixed(2)} %`, score, track:"early" };
 }
 
 // Conservative calibration from completed paper positions, never from open marks.

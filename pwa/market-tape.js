@@ -36,7 +36,10 @@ export function completeTape(pair) {
 
 export function preferMarket(primary, alternate, now) {
   const completeBaseline = pair => Number.isFinite(pair?.raw?.volume?.h1) && Number.isFinite(pair?.raw?.priceChange?.h1);
-  if (!completeTape(alternate) || now - alternate.observedAt > 15000 ||
+  if (!alternate || alternate.observedAt > now || now - alternate.observedAt > 15000) return primary;
+  // A real price and pool identity can start tape collection even with no 5m bars.
+  if (!primary) return alternate;
+  if (!completeTape(alternate) ||
       (completeTape(primary) && (completeBaseline(primary) || !completeBaseline(alternate)))) return primary;
   if (primary && primary.market.pool !== alternate.market.pool) return primary;
   return alternate;
@@ -58,17 +61,24 @@ export function marketTape(signal) {
   const canRefresh = token => !active && Date.now() >= next && Date.now() >= (retry.get(token) ?? 0);
   const tradeCache = new Map();
   let nextTrades = 0, tradeBusy = false;
+  const tradeKey = (pool, token) => `${pool}:${token}`;
+  const canTrade = (pool, token, now) => !tradeBusy && now >= nextTrades &&
+    now - (tradeCache.get(tradeKey(pool, token))?.at ?? 0) >= 12000;
   return {
     canRefresh,
+    canTrade,
     trades(pool, token) { return tradeCache.get(`${pool}:${token}`)?.rows ?? []; },
     async refreshTrades(pool, token) {
-      const now = Date.now(), key = `${pool}:${token}`;
-      if (!address.test(pool) || !address.test(token) || tradeBusy || now < nextTrades || now - (tradeCache.get(key)?.at ?? 0) < 8000) return;
+      const now = Date.now(), key = tradeKey(pool, token);
+      if (!address.test(pool) || !address.test(token) || !canTrade(pool,token,now)) return false;
       tradeBusy = true; nextTrades = now + 8000;
+      tradeCache.set(key, {at:now, rows:tradeCache.get(key)?.rows ?? []});
+      while(tradeCache.size>100) tradeCache.delete(tradeCache.keys().next().value);
       try {
         const data = await fetchJson(`${gecko}/pools/${pool}/trades`, {}, signal);
-        if (!Array.isArray(data?.data)) return;
+        if (!Array.isArray(data?.data)) return false;
         const rows = new Map((tradeCache.get(key)?.rows ?? []).map(t => [t.id,t]));
+        const previous = rows.size;
         for (const row of data.data) {
           const a = row.attributes; if (!a || !row.id) continue;
           const buy = a.to_token_address === token, sell = a.from_token_address === token;
@@ -77,7 +87,7 @@ export function marketTape(signal) {
           if (Number.isFinite(t.at) && t.price > 0 && t.usd > 0) rows.set(t.id,t);
         }
         tradeCache.set(key,{at:now,rows:[...rows.values()].filter(t=>t.at>=now-300000).sort((a,b)=>a.at-b.at).slice(-3000)});
-        while(tradeCache.size>100) tradeCache.delete(tradeCache.keys().next().value);
+        return rows.size > previous;
       } catch(e) { if(e.status===429) nextTrades=Date.now()+Math.max(60000,e.retryAfterMs??0); throw e; }
       finally { tradeBusy=false; }
     },
