@@ -50,29 +50,30 @@ export function trojanDecision(pair, sources, profile, now, settings = {}) {
   if (v24 < 0 || v5 < 0 || [m5, h1, h24].some(v => v !== null && (v < -100 || v > 100000))) {
     return result("reject", "Virheellinen markkinadata");
   }
-  if(v24<limit("MinVolume24",0)||(v5??0)<limit("MinVolume5",0)||sources.size<limit("MinSources",1))return result("watch","Volyymi tai lähdemäärä alle rajan");
+  
   if(limit("MaxAge",0)>0&&(!created||(now-created)/60000>limit("MaxAge",0)))return result("reject","Poolin ikäraja");
   const five = flow(pair, "m5");
   const short = !five.includes(null);
   const [buys, sells] = short ? five : flow(pair, "h1");
   const total = buys + sells;
   if (![buys, sells].every(v => Number.isSafeInteger(v) && v >= 0) ||
-      total < (short ? limit("MinTrades",sniper?3:4) : limit("MinTradesHour",5)) || [m5, h1, h24].includes(null) || m5 <= limit("MinChange5",0)) {
+      total <= 0 || m5 === null) {
     return result("watch", "Odotetaan kauppoja ja positiivista 5 min käännettä");
   }
-  if (m5 > limit("MaxChange5",8) || h1 < limit("MinChange1h",-25) || h1 > limit("MaxChange1h",35) || h24 < limit("MinChange24",-70)) return result("reject", "Liian voimakas hintaliike");
+  
   if (total <= 0 || buys <= sells) return result("watch", "Odotetaan ostopainetta");
-  if (v24 / Math.max(liquidity, 1) > limit("MaxVolumeRatio",15) || created > now + 300000) {
+  if (created > now + 300000) {
     return result("reject", "Poikkeava volyymisuhde tai aikaleima");
   }
   if (created > 0 && (now - created) / 60000 < limit("MinAge",sniper?0:5)) return result("watch", "Odotetaan poolin ikää");
   const pressure = buys / total;
-  if (pressure < Math.max(.52, limit("MinPressure", 52) / 100)) return result("reject", "Heikko ostopaine");
+  
   const score = Math.min(100, points(liquidity, [[100000, 25], [50000, 22], [20000, 18], [0, 12]]) +
     points(v5 ?? v24, [[5000, 15], [1000, 11], [100, 7], [0, 3]]) +
     points(pressure, [[.75, 25], [.65, 21], [.58, 16], [.52, 10]]) +
-    (m5 <= 2 ? 20 : m5 <= 5 ? 15 : 8) + (h1 >= -12 && h1 <= 8 ? 10 : h1 <= 15 ? 5 : 0) +
+    (m5 <= 0 ? 0 : m5 <= 2 ? 20 : m5 <= 5 ? 15 : m5 <= 20 ? 8 : 0) + (h1 === null ? 0 : h1 >= -12 && h1 <= 8 ? 10 : h1 >= -25 && h1 <= 15 ? 5 : 0) +
     points(sources.size, [[3, 5], [2, 3]]));
-  return result(score >= limit("MinScore",sniper?75:70) ? "approve" : score >= 50 ? "watch" : "reject",
-    "Trojan V2 dip-reversal", score);
+  const adjusted = Math.max(0, score - (v24 / Math.max(liquidity,1)>15 ? 15 : 0) - (total<3 ? 10 : 0) - (h24!==null && h24 < -70 ? 10 : 0));
+  return result(adjusted >= limit("MinScore",sniper?75:70) ? "approve" : adjusted >= 50 ? "watch" : "reject",
+    "Trojan V2 dip-reversal", adjusted);
 }
