@@ -98,3 +98,34 @@ export function momentumExit(book, tick, policy) {
   if (weak && finite(short) && short < 0 && finite(buying) && buying < .45 && !confirmed)
     return exit(9, "Negatiivinen momentum ja kasvava myyntipaine");
 }
+
+// Short-window observations must be actual timestamped trades, not inferred from rolling 5m totals.
+export function shortMomentum(trades, now) {
+  const rows = trades.filter(t => finite(t.at) && t.at <= now && t.at >= now - 300000 &&
+    finite(t.price) && t.price > 0 && finite(t.usd) && t.usd > 0 && ["buy","sell"].includes(t.side))
+    .sort((a,b) => a.at-b.at);
+  const windows = {};
+  for (const seconds of [5,15,30,60,300]) {
+    const w = rows.filter(t => t.at > now-seconds*1000);
+    const volume = w.reduce((n,t)=>n+t.usd,0);
+    windows[seconds] = w.length >= 3 ? { count:w.length, volume,
+      pressure:w.filter(t=>t.side==="buy").reduce((n,t)=>n+t.usd,0)/volume,
+      move:(w.at(-1).price/w[0].price-1)*100, high:Math.max(...w.map(t=>t.price)),
+      low:Math.min(...w.map(t=>t.price)) } : null;
+  }
+  return windows;
+}
+
+export function momentumSignal(w, quality, threshold=80) {
+  const a=w[5], b=w[15], c=w[30], d=w[60];
+  if (!a || !b || !c || !d || !finite(quality)) return {decision:"watch",code:"short-data"};
+  const acceleration = d.volume > b.volume ? (b.volume/15)/((d.volume-b.volume)/45) : 0;
+  const score=Math.round(clamp(b.pressure*25+clamp(acceleration/3,0,1)*25+
+    clamp(b.move/3,0,1)*20+clamp(quality/100,0,1)*15+
+    (d.move>0?10:0)+5,0,100));
+  const early=a.move>0 && b.move>0 && b.pressure>=.65 && acceleration>=1.5;
+  const pullback=d.move>0 && c.move<0 && a.move>0 && a.pressure>=.65;
+  const breakout=d.move>0 && b.move>0 && a.move>0 && a.high>=d.high && acceleration>=1.5;
+  const signal=breakout?"breakout":pullback?"pullback":early?"early":null;
+  return {decision:signal && score>=threshold?"approve":"watch",code:signal??"weak-momentum",score};
+}
