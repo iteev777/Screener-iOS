@@ -61,13 +61,13 @@ export function trojanDecision(pair, sources, profile, now, settings = {}) {
     return result("watch", "Odotetaan kauppoja ja positiivista 5 min käännettä");
   }
   if (m5 > limit("MaxChange5",8) || h1 < limit("MinChange1h",-25) || h1 > limit("MaxChange1h",35) || h24 < limit("MinChange24",-70)) return result("reject", "Liian voimakas hintaliike");
-  if (total<=0) return result("watch", "Odotetaan ostopainetta");
+  if (total <= 0 || buys <= sells) return result("watch", "Odotetaan ostopainetta");
   if (v24 / Math.max(liquidity, 1) > limit("MaxVolumeRatio",15) || created > now + 300000) {
     return result("reject", "Poikkeava volyymisuhde tai aikaleima");
   }
   if (created > 0 && (now - created) / 60000 < limit("MinAge",sniper?0:5)) return result("watch", "Odotetaan poolin ikää");
   const pressure = buys / total;
-  if (pressure < limit("MinPressure",52)/100) return result("reject", "Heikko ostopaine");
+  if (pressure < Math.max(.52, limit("MinPressure", 52) / 100)) return result("reject", "Heikko ostopaine");
   const score = Math.min(100, points(liquidity, [[100000, 25], [50000, 22], [20000, 18], [0, 12]]) +
     points(v5 ?? v24, [[5000, 15], [1000, 11], [100, 7], [0, 3]]) +
     points(pressure, [[.75, 25], [.65, 21], [.58, 16], [.52, 10]]) +

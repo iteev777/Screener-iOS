@@ -4,6 +4,7 @@ mainMinLiquidity:8000,sniperMinLiquidity:2500,mainMinVolume24:10000,sniperMinVol
 mainOrderUsd: 5, mainStop: 9, mainProfit: 8, mainProfitShare: 50, mainFinalProfit: 10, mainTrailing: 3.5, mainBreakEven: 0, mainHoldMinutes: 15, mainDca: 0, mainDcaDrop: 5, sniperOrderUsd: 5, sniperStop: 9, sniperProfit: 8, sniperProfitShare: 50, sniperFinalProfit: 10, sniperTrailing: 3.5, sniperBreakEven: 0, sniperHoldMinutes: 15, sniperDca: 0, sniperDcaDrop: 5,
 
   analysisWorkers: 24, maxMainPositions: 10, maxSniperPositions: 10, maxTotalPositions: 15, balanceFraction: 10, dcaDrop: 3,
+  paperCapital: 1000, momentumScore: 80, momentumProfitShare: 50, momentumMinUsd: 1, momentumMaxUsd: 20, momentumTrailing: 10, momentumLiquidityDrop: 40,
   strategy: 0, orderUsd: 100, exposureUsd: 200, lossUsd: 50, stop: 5, profit: 10, profitShare: 100, finalProfit: 20,
   trailing: 5, breakEven: 5, holdMinutes: 240, cooldownSeconds: 60,
   feeBps: 20, slippageBps: 15, dca: 0, interval: 30, minLiquidity: 10000, rugScore: 0, maxPools: 12, maxDailyBuys: 20, scanMinVolume: 10000
@@ -14,7 +15,9 @@ mainMinLiquidity:[0,1000000000],sniperMinLiquidity:[0,1000000000],mainMinVolume2
 mainOrderUsd: [1,500], mainStop: [0.1,50], mainProfit: [0.1,500], mainProfitShare: [1,100], mainFinalProfit: [0.1,500], mainTrailing: [0,50], mainBreakEven: [0,100], mainHoldMinutes: [1,1440], mainDca: [0,1], mainDcaDrop: [0.1,49], sniperOrderUsd: [1,500], sniperStop: [0.1,50], sniperProfit: [0.1,500], sniperProfitShare: [1,100], sniperFinalProfit: [0.1,500], sniperTrailing: [0,50], sniperBreakEven: [0,100], sniperHoldMinutes: [1,1440], sniperDca: [0,1], sniperDcaDrop: [0.1,49],
 
   analysisWorkers: [1,24], maxMainPositions: [1,30], maxSniperPositions: [1,30], maxTotalPositions: [1,30], balanceFraction: [1,100], dcaDrop: [0.1,49],
-  strategy: [0, 7], orderUsd: [1, 500], exposureUsd: [1, 1000], lossUsd: [1, 1000],
+  paperCapital: [10, 1000000], momentumScore: [50, 100], momentumProfitShare: [10, 90], momentumMinUsd: [1, 500], momentumMaxUsd: [1, 500],
+  momentumTrailing: [1, 35], momentumLiquidityDrop: [10, 90],
+  strategy: [0, 8], orderUsd: [1, 500], exposureUsd: [1, 1000], lossUsd: [1, 1000],
   stop: [0.1, 50], profit: [0.1, 500], profitShare: [1, 100], finalProfit: [0.1, 500], trailing: [0, 50], breakEven: [0, 100],
   holdMinutes: [1, 1440], cooldownSeconds: [0, 3600], feeBps: [0, 500],
   slippageBps: [0, 500], dca: [0, 1], interval: [15, 300], minLiquidity: [0, 1e9], rugScore: [0, 100], maxPools: [1, 30], maxDailyBuys: [1, 100], scanMinVolume: [0, 1e9]
@@ -30,7 +33,7 @@ export function validateSettings(input) {
     settings[name] = value;
   }
   if (![settings.strategy, settings.dca, settings.maxPools, settings.maxDailyBuys, settings.analysisWorkers, settings.maxMainPositions, settings.maxSniperPositions, settings.maxTotalPositions].every(Number.isInteger) ||
-      settings.orderUsd > settings.exposureUsd || (settings.dca && settings.dcaDrop >= settings.stop) ||
+      settings.momentumMinUsd > settings.momentumMaxUsd || settings.orderUsd > settings.exposureUsd || (settings.dca && settings.dcaDrop >= settings.stop) ||
       (settings.profitShare < 100 && settings.finalProfit <= settings.profit)) {
     throw new Error("Tarkista strategia, lisäostot, enimmäispositio ja voittotavoitteiden järjestys.");
   }
@@ -51,7 +54,7 @@ export function strategySettings(policy, strategy) {
 }
 
 export const reasons = ["", "Stop loss", "Break-even", "Trailing stop", "Aikaraja",
-  "Take profit", "Strategia", "Lisäosto"];
+  "Take profit", "Strategia", "Lisäosto", "Likviditeettiraja", "Trendikäännös", "Manuaalinen sulkeminen"];
 
 export function trojanExitReason(book, tick, settings) {
   const entry = book.cost / book.sol;
@@ -101,6 +104,8 @@ export function applyPaperFill(book, order, tick, settings) {
   const {slip,fee}=model;
   const buy = order.side === "Osto";
   let realizedPnl = null;
+  const openedAt = book.openedAt;
+  const quantity = buy ? order.usd * (1 - fee) / (price * (1 + slip)) : Math.min(order.sol, book.sol);
   const fill = price * (1 + (buy ? slip : -slip));
   if (buy) {
     const day = Math.floor(at / 86400000);
@@ -140,7 +145,9 @@ export function applyPaperFill(book, order, tick, settings) {
   book.lastTradeAt = at;
   book.count = (book.count ?? 0) + 1;
   book.trades.unshift({ side: order.side, price: fill, reason: order.reason, at,
-    realizedPnl, estimatedImpactPct: model.impact*100, executionModel: model.source, quantity: buy ? order.usd * (1 - fee) / fill : Math.min(order.sol, book.sol+order.sol) });
+    realizedPnl, detail: order.detail, feeUsd: (buy ? order.usd : fill * quantity) * fee,
+    notional: buy ? order.usd : fill * quantity, closed: !buy && book.sol === 0,
+    executionDelayMs: tick.signalAt != null ? at - tick.signalAt : undefined, heldMs: !buy && openedAt != null ? at - openedAt : undefined, estimatedImpactPct: model.impact*100, executionModel: model.source, quantity });
   book.trades = book.trades.slice(0, 200);
 }
 
@@ -149,7 +156,7 @@ export function paperExecutionCost(book,order,tick,settings){
   const notional=buy?order.usd:Math.min(order.sol,book.sol)*tick.price;
   const baseline=settings.slippageBps/10000;
   const fee=settings.feeBps/10000;
-  if(!settings.trojanExit)return {slip:baseline,fee,impact:0,source:"fixed"};
+  if(!settings.trojanExit && settings.strategy !== 8)return {slip:baseline,fee,impact:0,source:"fixed"};
   // Indicative constant-product proxy, not a guaranteed executable quote.
   const reserve=Number(tick.liquidity)/2;
   const impact=Number.isFinite(reserve)&&reserve>0?notional/(reserve+notional):0.5;

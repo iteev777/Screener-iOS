@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 import { fetchJson } from "./network.js";
-import { normalizePair, discoverMarkets, fetchCandles, searchMarkets } from "./markets.js";
+import { eventRows } from "./agent-dashboard.js";
+import { timeframes, normalizePair, discoverMarkets, fetchCandles, searchMarkets } from "./markets.js";
 
-export function mountMarkets({ selection, select }) {
+export function mountMarkets({ selection, select, history }) {
   const form = document.getElementById("market-search");
   const rows = document.getElementById("market-results");
   const status = document.getElementById("market-status");
@@ -23,14 +24,50 @@ export function mountMarkets({ selection, select }) {
     ]);
   };
   const canvas = document.getElementById("token-chart");
-  function draw(data) {
-    const ctx=canvas.getContext("2d"); if(!ctx)return;
-    const w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);
-    if(!data.length)return;
-    const low=Math.min(...data.map(c=>c.low)), high=Math.max(...data.map(c=>c.high));
-    const y=v=>12+(high-v)/(high-low||high||1)*(h-40), step=(w-24)/data.length;
-    data.forEach((c,i)=>{const x=12+(i+.5)*step;ctx.strokeStyle=ctx.fillStyle=c.close>=c.open?"#89e8c1":"#ff8585";ctx.beginPath();ctx.moveTo(x,y(c.high));ctx.lineTo(x,y(c.low));ctx.stroke();ctx.fillRect(x-step*.3,Math.min(y(c.open),y(c.close)),step*.6,Math.max(1,Math.abs(y(c.open)-y(c.close))));});
-    document.getElementById("chart-range").textContent=`${low.toPrecision(5)} – ${high.toPrecision(5)} · ${data.length} kynttilää`;
+  function draw(data, target, interval) {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const { width, height } = canvas;
+    ctx.clearRect(0, 0, width, height);
+    const local = target ? history(target.token) : { fills: [], decisions: [] };
+    document.getElementById("token-decisions").replaceChildren(...eventRows(local.decisions.slice(0, 20)));
+    if (!data.length) return;
+    const low = Math.min(...data.map(candle => candle.low));
+    const high = Math.max(...data.map(candle => candle.high));
+    const maxVolume = Math.max(1, ...data.map(candle => candle.volume));
+    const y = value => 12 + (high - value) / (high - low || high || 1) * (height - 80);
+    const step = (width - 24) / data.length;
+    const plotX = index => 12 + (index + .5) * step;
+    data.forEach((candle, index) => {
+      const x = plotX(index);
+      ctx.strokeStyle = ctx.fillStyle = candle.close >= candle.open ? "#89e8c1" : "#ff8585";
+      ctx.beginPath();
+      ctx.moveTo(x, y(candle.high));
+      ctx.lineTo(x, y(candle.low));
+      ctx.stroke();
+      ctx.fillRect(x - step * .3, Math.min(y(candle.open), y(candle.close)),
+        step * .6, Math.max(1, Math.abs(y(candle.open) - y(candle.close))));
+      const volume = 45 * candle.volume / maxVolume;
+      ctx.globalAlpha = .50;
+      ctx.fillRect(x - step * .3, height - 10 - volume, step * .6, volume);
+      ctx.globalAlpha = 1;
+    });
+    for (const fill of local.fills) {
+      if (fill.pool !== target.pool) continue;
+      const when = fill.at / 1000;
+      const index = data.findIndex(candle => when >= candle.time && when < candle.time + timeframes[interval][2]);
+      if (index < 0) continue;
+      const buy = fill.side === "Osto";
+      const x = plotX(index);
+      const yMark = y(Math.min(high, Math.max(low, fill.price)));
+      ctx.fillStyle = buy ? "#63e6ae" : "#fb7185";
+      ctx.beginPath();
+      ctx.moveTo(x, yMark);
+      ctx.lineTo(x - 5, yMark + (buy ? 8 : -8));
+      ctx.lineTo(x + 5, yMark + (buy ? 8 : -8));
+      ctx.fill();
+    }
+    document.getElementById("chart-range").textContent = `${low.toPrecision(5)} – ${high.toPrecision(5)} · ${data.length} kynttilää · ▲ osto / ▼ myynti`;
   }
   form.onsubmit = async event => {
     event.preventDefault();
@@ -58,12 +95,12 @@ export function mountMarkets({ selection, select }) {
             document.getElementById("candles").replaceChildren();
             clearDetails();
             inspected = market;
-            draw([]);
+            draw([], market);
             candlesRequest?.abort();
           }
         }).catch(error => { status.textContent = error.message; });
         const inspect=document.createElement("button"); inspect.type="button"; inspect.className="secondary"; inspect.textContent="Tiedot";
-        inspect.onclick=()=>{ clearDetails(); inspected=market; candlesRequest?.abort(); draw([]); document.getElementById("chart-range").textContent=""; document.getElementById("token-detail-title").textContent=market.symbol||market.token; document.getElementById("token-detail-data").textContent=`Mint ${market.token} · Pool ${market.pool} · Hinta ${market.price} · Likviditeetti ${market.liquidity} · Volyymi 24h ${market.volume??"—"} · Muutos 24h ${market.change??"—"} %`; document.getElementById("load-candles").click(); };
+        inspect.onclick=()=>{ clearDetails(); inspected=market; candlesRequest?.abort(); draw([], market); document.getElementById("chart-range").textContent=""; document.getElementById("token-detail-title").textContent=market.symbol||market.token; document.getElementById("token-detail-data").textContent=`Mint ${market.token} · Pool ${market.pool} · Hinta ${market.price} · Likviditeetti ${market.liquidity} · Volyymi 24h ${market.volume??"—"} · Markkina-arvo ${market.marketCap??"—"} · Muutos 24h ${market.change??"—"} %`; document.getElementById("load-candles").click(); };
         row.append(choose,inspect);
         rows.append(row);
       }
@@ -80,9 +117,11 @@ export function mountMarkets({ selection, select }) {
     const request = new AbortController();
     candlesRequest = request;
     try {
-      const data = await fetchCandles(inspected ?? selection(), document.getElementById("chart-timeframe").value, request.signal);
+      const target = inspected ?? selection();
+      const interval = document.getElementById("chart-timeframe").value;
+      const data = await fetchCandles(target, interval, request.signal);
       if (request.signal.aborted) return;
-      draw(data);
+      draw(data, target, interval);
       const lines = data.slice(-12).reverse().map(candle => {
         const item = document.createElement("li");
         item.textContent = `${new Date(candle.time * 1000).toLocaleString("fi-FI")}: O ${candle.open} · H ${candle.high} · L ${candle.low} · C ${candle.close} · V ${candle.volume}`;

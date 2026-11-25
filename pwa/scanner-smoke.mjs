@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
-import { chromium } from "playwright";
+import { createHash } from "node:crypto";
+import { chromium, devices, webkit } from "playwright";
 import { publicKeyBytes } from "./wallet-standard.js";
 
-const browser = await chromium.launch({ executablePath: process.env.SCREENER_CHROMIUM });
+const view = (page, pageName) => page.locator(`#dashboard-nav [data-view="${pageName}"]`).click();
+const emulatedWebKit = process.env.SCREENER_BROWSER === "webkit";
+const browser = await (emulatedWebKit ? webkit.launch() : chromium.launch({ executablePath: process.env.SCREENER_CHROMIUM }));
 const site = process.env.SCREENER_PWA_URL ?? "http://127.0.0.1:8018/";
 const wsol = "So11111111111111111111111111111111111111112";
 const market = [
@@ -11,10 +14,20 @@ const market = [
 ];
 
 try {
-  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const page = await browser.newPage(emulatedWebKit ? devices["iPhone 13"] : { viewport: { width: 390, height: 844 } });
   const errors = [];
+  const workers = [];
+  page.on("worker", worker => workers.push(worker.url()));
   page.on("pageerror", error => errors.push(error.message));
-  const sniper = process.env.SCREENER_SCANNER_PROFILE === "sniper";
+
+  const profile = process.env.SCREENER_SCANNER_PROFILE;
+  const sniper = profile === "sniper";
+  const momentum = profile === "momentum";
+  await page.route("**/*", route => {
+    if (new URL(route.request().url()).origin === new URL(site).origin) return route.continue();
+    return route.fulfill({ json: [], headers: { "Access-Control-Allow-Origin": "*" } });
+  });
+  let notificationCount = 0;
   let dropping = false;
   let fail = false;
   await page.route("https://api.geckoterminal.com/api/v2/networks/solana/**", route =>
@@ -25,19 +38,35 @@ try {
     })), included: market.map(([token, , symbol]) => ({
       type: "token", id: `solana_${token}`, attributes: { symbol }
     })) } }));
+  for (const endpoint of ["wss://solana-rpc.publicnode.com/", "wss://api.mainnet-beta.solana.com/"]) {
+    await page.routeWebSocket(endpoint, socket => {
+      socket.onMessage(data => {
+        const message = JSON.parse(data);
+        if (message.method !== "logsSubscribe") return;
+        notificationCount++;
+        socket.send(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: message.id }));
+        socket.send(JSON.stringify({ method: "logsNotification", params: {
+          subscription: message.id, result: { context: { slot: 100 }, value: { err: null } }
+        } }));
+      });
+    });
+  }
   await page.routeWebSocket("wss://pumpportal.fun/api/data", socket => {
     socket.onMessage(data => {
-      assert.equal(JSON.parse(data).method, "subscribeNewToken");
+      const { method } = JSON.parse(data);
+      if (momentum && method === "subscribeMigration") return;
+      assert.equal(method, "subscribeNewToken");
       for (const [mint] of market) socket.send(JSON.stringify({ txType: "create", mint }));
     });
   });
   await page.route("https://api.dexscreener.com/**/v1", route =>
-    route.fulfill({ json: market.map(([tokenAddress]) => ({ chainId: "solana", tokenAddress })) }));
+    route.fulfill({ json: (dropping ? [] : market).map(([tokenAddress]) => ({ chainId: "solana", tokenAddress })) }));
   await page.route("https://api.dexscreener.com/tokens/v1/solana/**", route =>
-    route.fulfill({ json: market.filter(([token]) => route.request().url().includes(token)).map(([token, pool, symbol]) => ({
+    route.fulfill({ json: (dropping ? [] : market).filter(([token]) => route.request().url().includes(token)).map(([token, pool, symbol]) => ({
       chainId: "solana", pairAddress: pool, baseToken: { address: token, symbol }, quoteToken: { address: wsol },
-      priceUsd: "100", liquidity: { usd: 100000 }, volume: { h24: 30000, m5: 5000 },
-      priceChange: { m5: 2, h1: 1, h24: 4 }, txns: { m5: { buys: 9, sells: 3 } }
+      priceUsd: "100", liquidity: { usd: 100000 }, volume: { h24: 200000, h6: 200000, h1: 80000, m5: 25000 },
+      pairCreatedAt: Date.now() - 30 * 60000,
+      priceChange: { m5: 2, h1: 1, h6: 3, h24: 4 }, txns: { m5: { buys: 90, sells: 10 } }
     })) }));
   await page.route("https://api.dexscreener.com/latest/dex/pairs/solana/**", route => {
     const selected = market.filter(([, pool]) => route.request().url().includes(pool));
@@ -52,15 +81,34 @@ try {
     const { method, params } = route.request().postDataJSON();
     assert.equal(method, "getMultipleAccounts");
     if (params[1].encoding === "base64") {
-      const value = params[0].map(pool => {
+      const owner = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C";
+      const tokenProgram = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+      const pack = (data, program) => ({ executable: false, owner: program, data: [Buffer.from(data).toString("base64"), "base64"] });
+      const poolState = pool => {
         const bytes = new Uint8Array(413);
         bytes.set([247, 237, 227, 245, 215, 195, 222, 70]);
         bytes.set(publicKeyBytes(market.find(row => row[1] === pool)[0]), 168);
         bytes.set(publicKeyBytes(wsol), 200);
-        return { executable: false, owner: "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
-          data: [Buffer.from(bytes).toString("base64"), "base64"] };
-      });
-      return route.fulfill({ json: { id: 1, result: { value } } });
+        bytes.set(publicKeyBytes(market[1][1]), 72);
+        bytes.set(publicKeyBytes(market[0][0]), 104);
+        return pack(bytes, owner);
+      };
+      const vault = mint => {
+        const bytes = new Uint8Array(165);
+        bytes.set(publicKeyBytes(mint));
+        new DataView(bytes.buffer).setBigUint64(64, 500_000_000_000n, true);
+        bytes[108] = 1;
+        return pack(bytes, tokenProgram);
+      };
+      const mint = new Uint8Array(82);
+      mint[44] = 6;
+      mint[45] = 1;
+      const config = new Uint8Array(116);
+      config.set(createHash("sha256").update("account:AmmConfig").digest().subarray(0, 8));
+      const [pool, , , base, quote] = params[0];
+      const value = params[0].length === 6 ? [poolState(pool), vault(base), vault(quote),
+        pack(mint, tokenProgram), pack(mint, tokenProgram), pack(config, owner)] : params[0].map(poolState);
+      return route.fulfill({ json: { id: 1, result: { context: { slot: 1 }, value } } });
     }
     return route.fulfill({ json: { id: 1, result: { value: params[0].map(() => ({
       owner: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
@@ -75,54 +123,90 @@ try {
       liquidity: { usd: 100000 } }] }));
   await page.route("https://api.jup.ag/swap/v2/order?**", route => {
     const params = new URL(route.request().url()).searchParams;
+    const out = params.get("inputMint") === wsol ? BigInt(params.get("amount"))
+      : BigInt(params.get("amount")) * 98n / 100n;
     return route.fulfill({ json: { inputMint: params.get("inputMint"), outputMint: params.get("outputMint"),
-      inAmount: params.get("amount"), outAmount: "10000", otherAmountThreshold: "9900",
+      inAmount: params.get("amount"), outAmount: String(out), otherAmountThreshold: String(out * 99n / 100n),
       priceImpactPct: "0.001", routePlan: [{ percent: 100, swapInfo: { label: "fixture" } }], transaction: null } });
   });
   await page.goto(site);
-  await page.locator("summary").getByText("Oma ehtopuu", { exact: true }).click();
+  await view(page, "settings");
   await page.locator("#rule-json").fill(JSON.stringify({
     entry: { metric: "price", compare: "gt", value: 1 },
     exit: { metric: "price", compare: "lt", value: 1 }
   }));
   await page.getByRole("button", { name: "Tallenna ehtopuut" }).click();
   await page.locator("#status").getByText("Ehtopuut tallennettu.").waitFor();
-  await page.getByText("Strategia ja riskirajat").click();
-  await page.locator('[name="strategy"]').selectOption(sniper ? "6" : "3");
+  await view(page, "settings");
+  await page.locator('[name="strategy"]').selectOption(momentum ? "8" : sniper ? "6" : "3");
   await page.getByRole("button", { name: "Tallenna asetukset" }).click();
   await page.locator("#status").getByText("Asetukset tallennettu.").waitFor();
   await page.clock.install();
   await page.locator("#scan").click();
+  await view(page, "monitoring");
+  await page.locator("#agent-cards article").last().waitFor();
+  assert.equal(await page.locator("#agent-cards article").count(), 5);
+  assert.ok(workers.some(url => url.endsWith("/analyst-worker.js")));
   for (let i = 0; i < 20; i++) {
     await page.clock.runFor(3001);
     if (await page.locator("#scan-positions li").count() === 2) break;
   }
+  await view(page, "positions");
+  if (await page.locator("#scan-positions li").count() !== 2) {
+    throw new Error(JSON.stringify(await page.evaluate(() => ({
+      events: document.getElementById("scan-events").textContent,
+      queue: document.getElementById("scan-queue").textContent,
+      status: document.getElementById("scan-status").textContent
+    }))));
+  }
   await page.locator("#scan-positions").getByText(/SECOND/).waitFor();
+  await page.clock.runFor(1500);
+  await view(page, "tokens");
   await page.locator("#scan-counts").getByText(/Löydetyt 2.*Hyväksytyt 2/).waitFor();
   assert.equal(await page.locator("#scan-positions li").count(), 2);
   if (sniper) {
     await page.getByText("Tokenien analyysiloki").click();
     await page.locator("#scan-events").getByText(/Hyväksytty.*Jupiter-reitti hyväksytty/).first().waitFor();
   }
-  assert.match(await page.locator("#scan-balance").innerText(), sniper ? /990/ : /800/);
+  if (momentum) {
+    const state = await page.evaluate(() => new Promise((resolve, reject) => {
+      const request = indexedDB.open("screener-paper");
+      request.onerror = reject;
+      request.onsuccess = () => {
+        const db = request.result;
+        const read = db.transaction("books").objectStore("books").get("scan-portfolio");
+        read.onerror = reject;
+        read.onsuccess = () => { db.close(); resolve(read.result); };
+      };
+    }));
+    assert.equal(state.trades.length, 2);
+    assert.ok(state.trades.every(trade => trade.strategy === 8 && trade.score >= 80 && trade.feeUsd > 0));
+    assert.ok(state.history.length > 0);
+    assert.ok(notificationCount > 0);
+    assert.ok(state.trades.every(trade => trade.executionDelayMs >= 1000));
+  } else assert.match(await page.locator("#scan-balance").innerText(), sniper ? /990/ : /800/);
   fail = true;
   await page.clock.runFor(6001);
+  await view(page, "tokens");
   await page.locator("#scan-status").getByText(/uudelleen.*503/).waitFor();
   fail = false;
   dropping = true;
   await page.clock.setSystemTime(Date.now() + 121000);
   await page.clock.runFor(6001);
+  await view(page, "positions");
   await page.locator("#scan-trades").getByText(/Myynti.*SECOND/).waitFor();
-  assert.equal(await page.locator("#scan-positions li").count(), 0);
+  await page.waitForFunction(() => document.querySelectorAll("#scan-positions li").length === 0);
   await page.evaluate(() => window.dispatchEvent(new Event("offline")));
   await page.locator("#status").getByText(/Verkkoyhteys katkesi/).waitFor();
   assert.equal(await page.locator("#stop").isDisabled(), true);
   await page.reload();
-  await page.getByText("Automaattinen Paper-salkku").click();
+  await view(page, "positions");
   await page.locator("#scan-trades").getByText(/Myynti.*SECOND/).waitFor();
   assert.equal(await page.locator("#scan-trades li").count(), 4);
+  await view(page, "filtering");
+  await page.locator("#agent-feed").getByText(/EXIT.*SECOND/).waitFor();
   assert.deepEqual(errors, []);
-  console.log(`${sniper ? "Trojan Sniper" : "Custom strategy"}: automatic two-market paper orders, shared capital, retry, risk exits and reload persistence`);
+  console.log(`${momentum ? "Aggressive Momentum" : sniper ? "Trojan Sniper" : "Custom strategy"}: automatic two-market paper orders, shared capital, retry, risk exits and reload persistence`);
 } finally {
   await browser.close();
 }

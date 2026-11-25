@@ -18,6 +18,11 @@ export async function fetchJson(url, options = {}, signal) {
     if (!response.ok) {
       const error = new Error(`HTTP ${response.status}`);
       error.status = response.status;
+      const retry = response.headers?.get("Retry-After");
+      if (retry) {
+        const delay = /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+        if (Number.isFinite(delay)) error.retryAfterMs = Math.max(0, delay);
+      }
       throw error;
     }
     return await response.json();

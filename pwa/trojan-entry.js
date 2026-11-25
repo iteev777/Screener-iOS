@@ -26,7 +26,7 @@ export function routeQuality(quote) {
     reason: impact > 3 ? "Jupiter-hintavaikutus yli 3 %" : score < 55 ? "Jupiter-reittipisteet alle 55" : "Jupiter-reitti hyväksytty" };
 }
 
-export async function analyzeEntryRoute(token, usd, { signal, apiKey, taker, slippageBps = 100, solUsd } = {}) {
+export async function analyzeEntryRoute(token, usd, { signal, apiKey, taker, slippageBps = 100, solUsd, checkExit = false, requestQuote = work => work() } = {}) {
   if (!address.test(token) || token === mint || !(usd > 0) || !Number.isFinite(usd) ||
       !Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > 100) throw new Error("Virheellinen Jupiter-ostopyyntö");
   if (taker) publicKeyBytes(taker);
@@ -34,13 +34,13 @@ export async function analyzeEntryRoute(token, usd, { signal, apiKey, taker, sli
   const amount = Math.round(usd / price * 1e9);
   if (!Number.isSafeInteger(amount) || amount < 1) throw new Error("Virheellinen WSOL-ostomäärä");
   const headers = apiKey ? { "x-api-key": apiKey } : {};
-  const request = async extra => {
-    const query = new URLSearchParams({ inputMint: mint, outputMint: token, amount, slippageBps, ...extra });
-    const quote = await fetchJson(`${endpoint}?${query}`, { headers }, signal);
+  const request = async (extra, inputMint = mint, outputMint = token, quantity = BigInt(amount)) => {
+    const query = new URLSearchParams({ inputMint, outputMint, amount: quantity, slippageBps, ...extra });
+    const quote = await requestQuote(() => fetchJson(`${endpoint}?${query}`, { headers }, signal));
     const out = integer(quote?.outAmount);
     const min = quote?.otherAmountThreshold == null && out !== null
       ? out * BigInt(10000 - slippageBps) / 10000n : integer(quote?.otherAmountThreshold);
-    if (quote?.inputMint !== mint || quote.outputMint !== token || integer(quote.inAmount) !== BigInt(amount) ||
+    if (quote?.inputMint !== inputMint || quote.outputMint !== outputMint || integer(quote.inAmount) !== quantity ||
         out === null || min === null || min <= 0n || min > out || min < out * BigInt(10000 - slippageBps) / 10000n) {
       throw new Error("Jupiter-tarjous ei vastaa pyyntöä");
     }
@@ -50,6 +50,18 @@ export async function analyzeEntryRoute(token, usd, { signal, apiKey, taker, sli
   if (quote.transaction) throw new Error("Jupiter palautti odottamattoman transaktion");
   const quality = routeQuality(quote);
   if (!quality.allowed) return quality;
+  if (checkExit) {
+    const reverse = await request({}, token, mint, out);
+    if (reverse.quote.transaction || !routeQuality(reverse.quote).allowed) {
+      return { ...quality, allowed: false, reason: "Jupiterin myyntireitti hylättiin" };
+    }
+    const roundTripBps = Number((BigInt(amount) - reverse.out) * 10000n / BigInt(amount));
+    if (roundTripBps > 500) {
+      return { ...quality, allowed: false, reason: "Jupiterin osto- ja myyntireitin kokonaisvaikutus yli 5 %" };
+    }
+    quality.reason += " · Myyntireitti tarkistettu";
+    quality.roundTripBps = roundTripBps;
+  }
   if (!taker) return { ...quality, simulation: "skipped" };
   const { quote: simulatedQuote, out: simulatedOut } = await request({ taker });
   if (!routeQuality(simulatedQuote).allowed ||

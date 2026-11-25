@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chromium } from "playwright";
 
 const base = process.env.SCREENER_PWA_URL ?? "http://127.0.0.1:8018/";
+const view = (page, pageName) => page.locator(`#dashboard-nav [data-view="${pageName}"]`).click();
 const browser = await chromium.launch({ executablePath: process.env.SCREENER_CHROMIUM });
 const marketUrl = "https://api.dexscreener.com/token-pairs/v1/solana/So11111111111111111111111111111111111111112";
 const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
@@ -58,11 +59,11 @@ try {
   console.log("Chromium WASM, 100,000 RSI calculations:", perf.ms.toFixed(2), "ms");
 
   await select("live");
-  assert.equal(await page.locator("#live").isDisabled(), true);
+  await page.waitForFunction(() => document.getElementById("live").disabled);
   assert.equal(await page.locator("#trades li").count(), 0);
   await select("paper");
   await page.locator("#balance").getByText(/1\s000/).waitFor();
-  await page.getByText("Strategia ja riskirajat").click();
+  await view(page, "settings");
   await page.locator('[name="exposureUsd"]').fill("250");
   await page.getByRole("button", { name: "Tallenna asetukset" }).click();
   await status.getByText("Asetukset tallennettu.").waitFor();
@@ -188,10 +189,13 @@ try {
   const livePage = await liveContext.newPage();
   await livePage.route("**/live-adapter.js", route => route.fulfill({
     contentType: "application/javascript",
-    body: `export function createLiveAdapter() {
+    body: `export async function reconcileLiveSignature() {
+      throw new Error("The fixture has no transactions to reconcile");
+    }
+    export function createLiveAdapter() {
       let book = { cash: 100, sol: 0, walletSol: 2, trades: [] };
       return {
-        ready: true, connect: async () => "mock-wallet", onWalletChange() {},
+        ready: true, journalAware: true, connect: async () => "11111111111111111111111111111111", onWalletChange() {},
         snapshot: async () => book,
         async execute({ order, price }) {
           if (order.side !== "Osto" || order.usd !== 100 || price !== 142) {
@@ -207,9 +211,10 @@ try {
   await livePage.route(marketUrl, route => route.fulfill({ status: 503 }));
   await livePage.goto(base);
   await livePage.locator("#mode").selectOption("live");
-  assert.equal(await livePage.locator("#live").isDisabled(), true);
+  await livePage.waitForFunction(() => document.getElementById("live").disabled);
   await livePage.locator("#connect").click();
   await livePage.locator("#balance").getByText(/2 SOL/).waitFor();
+  await livePage.locator("#status").getByText("Lompakko yhdistetty.").waitFor();
   livePage.once("dialog", dialog => dialog.dismiss());
   await livePage.locator("#live").click();
   assert.equal(await livePage.locator("#mode").isDisabled(), false);
