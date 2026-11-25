@@ -23,6 +23,16 @@ test("full RugCheck evaluates holder concentration and LP locks and fails closed
   assert.equal(fullRugCheck({ ...safe(), totalMarketLiquidity: 0 }).status, "reject");
 });
 
+test("RugCheck distinguishes its disabled authority sentinel from a fee or graph risk",()=>{
+  const transferFee={pct:0,maxAmount:0,authority:"11111111111111111111111111111111"};
+  const normal=fullRugCheck({...safe(),transferFee});
+  assert.ok(!normal.reasons.includes("Siirtomaksuvaltuus aktiivinen"));
+  const active=fullRugCheck({...safe(),transferFee:{...transferFee,authority:"real-authority"}});
+  assert.ok(active.reasons.includes("Siirtomaksuvaltuus aktiivinen"));
+  assert.equal(fullRugCheck({...safe(),transferFee:{...transferFee,pct:10}}).status,"reject");
+  assert.equal(fullRugCheck({...safe(),transferFee,graphInsidersDetected:3}).status,"reject");
+});
+
 test("pool decoder enforces owner, discriminator, status and RPC mint binding", async t => {
   const bytes = new Uint8Array(413);
   bytes.set([247, 237, 227, 245, 215, 195, 222, 70]);

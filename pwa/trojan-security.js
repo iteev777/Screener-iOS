@@ -8,6 +8,7 @@ const levels = {
   danger: "high", critical: "high", high: "high", warn: "medium", warning: "medium",
   medium: "medium", info: "low", low: "low"
 };
+const disabledAuthority = "11111111111111111111111111111111";
 
 export function fullRugCheck(data, { scoreLimit = 40, minHolders = 0, minLPProviders = 0,
   minPumpLock = 0, minRegularLock = 0, maxTopHolder = 50, maxTop10 = 80,
@@ -97,7 +98,10 @@ export function fullRugCheck(data, { scoreLimit = 40, minHolders = 0, minLPProvi
   if (rawFee != null && fee === null) risk("unknown", "Virheellinen siirtomaksu");
   else if (fee < 0 || fee >= 10) risk("high", "Siirtomaksu ylittää rajan");
   else if (fee > 0) risk("medium", "Tokenilla on siirtomaksu");
-  if (data?.transferFeeAuthority ?? data?.transferFee?.authority) risk("medium", "Siirtomaksuvaltuus aktiivinen");
+  // RugCheck uses Pubkey::default() for missing fee authority, including
+  // legacy SPL mints where the transfer-fee extension does not exist.
+  const feeAuthority = data?.transferFeeAuthority ?? data?.transferFee?.authority;
+  if (feeAuthority && feeAuthority !== disabledAuthority) risk("medium", "Siirtomaksuvaltuus aktiivinen");
   return { status: high || medium >= maxMedium ? "reject" : unknown ? "watch" : "approve",
     reasons, score, top, top10Pct, top3, creatorPct, lock, liquidity, high, medium, unknown };
 }
