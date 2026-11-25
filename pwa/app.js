@@ -1,5 +1,5 @@
 import { devnetBalance, newDevnetWallet, reconcileDevnet, submitDevnetMemo } from "./devnet.js";
-import { advancePortfolio, newPortfolio, runScanner, scanKey } from "./scanner.js";
+import { advancePortfolio, newPortfolio, runScanner, scanKey, scanPrices } from "./scanner.js";
 import { reconcileLiveSignature, createLiveAdapter } from "./live-adapter.js";
 
 import { currentMarket, watchSlots } from "./network.js";
@@ -354,6 +354,9 @@ function renderScan(portfolio, ticks = []) {
   byId("home-cash").textContent = usd.format(portfolio.cash);
   byId("home-pnl").textContent = usd.format(portfolio.realized);
   byId("home-count").textContent = String(positions.length);
+  const openValue = equity - portfolio.cash;
+  const unrealized = openValue - positions.reduce((sum,p)=>sum+p.cost,0);
+  byId("paper-live-summary").textContent = `Positiot ${usd.format(openValue)} · Avoin P/L ${usd.format(unrealized)} · Salkku ${usd.format(equity)}`;
   byId("scan-balance").textContent = `${usd.format(portfolio.cash)} käteistä · salkku ${usd.format(equity)} · toteutunut P/L ${usd.format(portfolio.realized)}`;
   const rows = (id, values) => byId(id).replaceChildren(...values.map(value => {
     const item = document.createElement("li");
@@ -411,6 +414,29 @@ function commitScan(ticks, decide, eligible, policy, signal) {
     transaction.oncomplete = () => resolve(portfolio);
     transaction.onabort = () => reject(transaction.error ?? new Error("Skannaussalkun kirjoitus keskeytyi."));
   });
+}
+
+// Independent foreground mark/exit monitor. Never opens positions.
+let idleMonitorBusy = false;
+async function refreshIdlePaper() {
+  if (idleMonitorBusy || run || !database || !engine || mode() !== "paper" ||
+      emergency || changingInterlock || closingPosition || document.visibilityState !== "visible") return;
+  idleMonitorBusy = true;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const portfolio = await stored(scanKey);
+    const markets = Object.values(portfolio?.positions ?? {}).map(p => p.market);
+    if (!markets.length) return;
+    const ticks = await scanPrices(markets, controller.signal);
+    if (run || emergency || changingInterlock || closingPosition || mode() !== "paper" || controller.signal.aborted) return;
+    const at = Date.now();
+    const updated = await commitScan(ticks.map(t => ({...t, observedAt:t.at, at, exitsOnly:true})),
+      () => 0, () => false, settings, controller.signal);
+    if (!run && mode() === "paper" && updated) renderScan(updated, ticks);
+  } catch (error) {
+    if (!controller.signal.aborted && !run) byId("scan-status").textContent = "Positioiden hintaseuranta: " + error.message;
+  } finally { clearTimeout(timeout); idleMonitorBusy = false; }
 }
 
 async function closePaperPosition(market) {
@@ -1053,6 +1079,7 @@ try {
   scanEvents = await stored("scan-events") ?? [];
   refreshFeed();
   renderScan(await stored(scanKey) ?? newPortfolio(settings.paperCapital));
+  setInterval(() => void refreshIdlePaper(), 3000);
   navigator.serviceWorker?.register("./sw.js").catch(error => console.warn(error));
 } catch (error) {
   byId("status").textContent = `Käynnistys epäonnistui. ${error.message}`;
