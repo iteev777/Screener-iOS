@@ -79,22 +79,74 @@ export function momentumExit(book, tick, policy) {
     (finite(acceleration) && acceleration < .65);
   const confirmed = buying >= .58 && acceleration >= 1 && short > 0 && hour >= 0;
   // Volatility can keep the configured distance or tighten it, within the approved cap.
-  const distance = momentumTrailingDistance(short, policy);
+  const distance = momentumTrailingDistance(short, { ...policy, momentumTrailing: Math.min(policy.momentumTrailing, 4) });
   const exit = (reason, detail, fraction = 1) => ({ side: "Myynti", sol: book.sol * fraction, reason, detail });
   if (finite(tick.liquidity) && finite(book.entryLiquidity) && book.entryLiquidity > 0 &&
       tick.liquidity <= book.entryLiquidity * (1 - policy.momentumLiquidityDrop / 100))
     return exit(8, "Likviditeetti romahti suhteessa ostoon");
-  if (move <= -policy.stop) return exit(1, "Kiinteä tappioraja");
+  if (move <= -(policy.momentumStop ?? 5)) return exit(1, "Kiinteä tappioraja");
   if (policy.breakEven > 0 && peakMove >= policy.breakEven && move <= 0)
     return exit(2, "Break-even-suoja");
   if ((1 - tick.price / peak) * 100 >= distance) return exit(3, "Volatiliteettiin mukautettu trailing stop");
-  if (at >= policy.holdMinutes * 60000) return exit(4, "Enimmäispitoaika");
+  if (at >= (policy.momentumHoldMinutes ?? 5) * 60000) return exit(4, "Enimmäispitoaika");
   const partial = policy.momentumProfitShare ?? 50;
   const costFloor = (policy.feeBps + policy.slippageBps) / 100;
-  if (weak && move >= Math.max(policy.profit, costFloor + 1) && !book.profitTaken)
-    return exit(5, "Momentum heikkeni voitollisessa positiossa", partial / 100);
-  if (book.profitTaken && weak && move >= policy.finalProfit)
+  if (move >= Math.max(policy.momentumProfit ?? 8, costFloor + 1) && !book.profitTaken)
+    return exit(5, "Ensimmäinen Momentum-voittotavoite", partial / 100);
+  if (book.profitTaken && move >= (policy.momentumFinalProfit ?? 15))
     return exit(5, "Jäljellä olevan osuuden voitto kotiutettu");
   if (weak && finite(short) && short < 0 && finite(buying) && buying < .45 && !confirmed)
     return exit(9, "Negatiivinen momentum ja kasvava myyntipaine");
+}
+
+// Short-window observations must be actual timestamped trades, not inferred from rolling 5m totals.
+export function shortMomentum(trades, now) {
+  const rows = trades.filter(t => finite(t.at) && t.at <= now && t.at >= now - 300000 &&
+    finite(t.price) && t.price > 0 && finite(t.usd) && t.usd > 0 && ["buy","sell"].includes(t.side))
+    .sort((a,b) => a.at-b.at);
+  const windows = {};
+  for (const seconds of [5,15,30,60,300]) {
+    const w = rows.filter(t => t.at > now-seconds*1000);
+    const volume = w.reduce((n,t)=>n+t.usd,0);
+    windows[seconds] = w.length >= 3 ? { count:w.length, volume,
+      pressure:w.filter(t=>t.side==="buy").reduce((n,t)=>n+t.usd,0)/volume,
+      move:(w.at(-1).price/w[0].price-1)*100, high:Math.max(...w.map(t=>t.price)),
+      low:Math.min(...w.map(t=>t.price)) } : null;
+  }
+  return windows;
+}
+
+export function momentumSignal(w, quality, threshold=80) {
+  const a=w[5], b=w[15], c=w[30], d=w[60];
+  if (!a || !b || !c || !d || !finite(quality)) return {decision:"watch",code:"short-data"};
+  const acceleration = d.volume > b.volume ? (b.volume/15)/((d.volume-b.volume)/45) : 0;
+  const score=Math.round(clamp(b.pressure*25+clamp(acceleration/3,0,1)*25+
+    clamp(b.move/3,0,1)*20+clamp(quality/100,0,1)*15+
+    (d.move>0?10:0)+5,0,100));
+  const early=a.move>0 && b.move>0 && b.pressure>=.65 && acceleration>=1.5;
+  const pullback=d.move>0 && c.move<0 && a.move>0 && a.pressure>=.65;
+  const breakout=d.move>0 && b.move>0 && a.move>0 && a.high>=d.high && acceleration>=1.5;
+  const signal=breakout?"breakout":pullback?"pullback":early?"early":null;
+  return {decision:signal && score>=threshold?"approve":"watch",code:signal??"weak-momentum",score};
+}
+
+// Conservative calibration from completed paper positions, never from open marks.
+export function momentumCalibration(trades, baseline=80) {
+  const groups=new Map(), completed=[];
+  for(const t of [...trades].reverse()){
+    if(t.strategy!==8 || !t.token || !t.pool) continue;
+    const key=t.token+":"+t.pool;
+    if(t.side==="Osto") groups.set(key,{pnl:0,cost:t.notional,score:t.score});
+    else if(t.side==="Myynti" && groups.has(key)){
+      const g=groups.get(key);
+      if(!finite(t.realizedPnl)){groups.delete(key);continue;}
+      g.pnl+=t.realizedPnl;
+      if(t.closed){if(g.cost>0 && finite(g.score)) completed.push(g);groups.delete(key);}
+    }
+  }
+  const sample=completed.slice(-60);
+  if(sample.length<30) return {threshold:baseline,samples:sample.length};
+  const mean=sample.reduce((n,t)=>n+t.pnl/t.cost,0)/sample.length;
+  // Only tighten automatically; lowering requires independent validation.
+  return {threshold:clamp(baseline+(mean<0?4:0),baseline,100),samples:sample.length,mean};
 }

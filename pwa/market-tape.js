@@ -56,8 +56,31 @@ export function marketTape(signal) {
     for (const map of [cached, retry]) while (map.size > 500) map.delete(map.keys().next().value);
   };
   const canRefresh = token => !active && Date.now() >= next && Date.now() >= (retry.get(token) ?? 0);
+  const tradeCache = new Map();
+  let nextTrades = 0, tradeBusy = false;
   return {
     canRefresh,
+    trades(pool, token) { return tradeCache.get(`${pool}:${token}`)?.rows ?? []; },
+    async refreshTrades(pool, token) {
+      const now = Date.now(), key = `${pool}:${token}`;
+      if (!address.test(pool) || !address.test(token) || tradeBusy || now < nextTrades || now - (tradeCache.get(key)?.at ?? 0) < 8000) return;
+      tradeBusy = true; nextTrades = now + 8000;
+      try {
+        const data = await fetchJson(`${gecko}/pools/${pool}/trades`, {}, signal);
+        if (!Array.isArray(data?.data)) return;
+        const rows = new Map((tradeCache.get(key)?.rows ?? []).map(t => [t.id,t]));
+        for (const row of data.data) {
+          const a = row.attributes; if (!a || !row.id) continue;
+          const buy = a.to_token_address === token, sell = a.from_token_address === token;
+          if (buy === sell) continue;
+          const t = {id:row.id, at:Date.parse(a.block_timestamp), price:number(buy?a.price_to_in_usd:a.price_from_in_usd), usd:number(a.volume_in_usd), side:buy?'buy':'sell'};
+          if (Number.isFinite(t.at) && t.price > 0 && t.usd > 0) rows.set(t.id,t);
+        }
+        tradeCache.set(key,{at:now,rows:[...rows.values()].filter(t=>t.at>=now-300000).sort((a,b)=>a.at-b.at).slice(-3000)});
+        while(tradeCache.size>100) tradeCache.delete(tradeCache.keys().next().value);
+      } catch(e) { if(e.status===429) nextTrades=Date.now()+Math.max(60000,e.retryAfterMs??0); throw e; }
+      finally { tradeBusy=false; }
+    },
     async poolPrices(pools) {
       if (!pools.length || !canRefresh("")) return [];
       active = true;
