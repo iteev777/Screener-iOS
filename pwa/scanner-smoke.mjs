@@ -28,6 +28,7 @@ try {
   let notificationCount = 0;
   let dropping = false;
   let fail = false;
+  const attemptedSizes=[];
   await page.route("https://api.geckoterminal.com/api/v2/networks/solana/**", route =>
     route.fulfill({ json: { data: (dropping ? [] : market).map(([token, pool]) => ({
       attributes: { address: pool, base_token_price_usd: "100", reserve_in_usd: "100000",
@@ -64,7 +65,7 @@ try {
       chainId: "solana", pairAddress: pool, baseToken: { address: token, symbol }, quoteToken: { address: wsol },
       priceUsd: "100", liquidity: { usd: 100000 }, volume: { h24: 200000, h6: 200000, h1: 80000, m5: 25000 },
       pairCreatedAt: Date.now() - 30 * 60000,
-      priceChange: { m5: 2, h1: 1, h6: 3, h24: 4 }, txns: { m5: { buys: 90, sells: 10 } }
+      priceChange: { m5: momentum?7:2, h1: 1, h6: 3, h24: 4 }, txns: { m5: { buys: 90, sells: 10 } }
     })) }));
   await page.route("https://api.dexscreener.com/latest/dex/pairs/solana/**", route => {
     const selected = market.filter(([, pool]) => route.request().url().includes(pool));
@@ -124,11 +125,15 @@ try {
   await page.route("https://api.jup.ag/swap/v2/order?**", route => {
     const params = new URL(route.request().url()).searchParams;
     const amount=BigInt(params.get("amount"));
+    const slippage=BigInt(params.get("slippageBps"));
+    const resized=momentum && params.get("inputMint")===wsol && params.get("outputMint")===market[0][0];
+    if (resized) attemptedSizes.push(amount);
     const out = params.get("inputMint") === wsol ? amount/1000n
       : amount*1000n*(dropping?78n:98n)/100n;
     return route.fulfill({ json: { inputMint: params.get("inputMint"), outputMint: params.get("outputMint"),
-      inAmount: params.get("amount"), outAmount: String(out), otherAmountThreshold: String(out * 99n / 100n),
-      priceImpactPct: "0.001", routePlan: [{ percent: 100, swapInfo: { label: "fixture" } }], transaction: null } });
+      inAmount: params.get("amount"), outAmount: String(out), otherAmountThreshold: String(out*(10000n-slippage)/10000n),
+      priceImpactPct: resized && amount>120_000_000n ? ".06" : "0.001",
+      routePlan: [{ percent: 100, swapInfo: { label: "fixture" } }], transaction: null } });
   });
   await page.goto(site);
   await view(page, "settings");
@@ -182,6 +187,8 @@ try {
       };
     }));
     assert.equal(state.trades.length, 2);
+    assert.ok(attemptedSizes.some(size=>size>120_000_000n) && attemptedSizes.some(size=>size<=120_000_000n));
+    assert.ok(state.trades.find(row=>row.token===market[0][0]).notional<=12);
     assert.ok(state.trades.every(trade => trade.strategy === 8 && trade.score >= 80 && trade.feeUsd > 0));
     assert.ok(state.history.length > 0);
     assert.ok(notificationCount > 0);

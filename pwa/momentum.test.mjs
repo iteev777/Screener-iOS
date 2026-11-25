@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { rankCandidates } from "./candidate-analyst.js";
-import { momentumEntry, momentumExit, momentumSize, shortMomentum, momentumSignal, momentumCalibration } from "./momentum.js";
+import { momentumEntry, momentumExit, momentumSize, shortMomentum, momentumSignal, momentumCalibration, snapshotMomentum } from "./momentum.js";
 import { defaults } from "./policy.js";
 import { advancePortfolio, newPortfolio } from "./scanner.js";
 
@@ -158,7 +158,8 @@ test("young pool fallback requires real recent flow and mature pools require a c
   };
   assert.equal(momentumEntry(active, sources, 80, now).decision, "approve");
   assert.equal(momentumEntry({ ...active, pairCreatedAt: now - 90 * 60000 }, sources, 80, now).code, "missing-baseline");
-  assert.equal(momentumEntry({ ...active, txns: { m5: { buys: 4, sells: 0 } } }, sources, 80, now).code, "thin-flow");
+  assert.equal(momentumEntry({ ...active, txns: { m5: { buys: 3, sells: 0 } } }, sources, 80, now).code, "thin-flow");
+  assert.equal(momentumEntry({ ...active, txns: {m5:{buys:4,sells:0}} },sources,80,now).code,"missing-baseline");
 });
 
 test("a partial profit releases cash and charges estimated costs before the remaining exit", () => {
@@ -188,6 +189,37 @@ test("short windows require timestamped trades and reject missing observations",
   assert.equal(w[5].count,5);
   assert.equal(w[60].count,60);
   assert.equal(momentumSignal(w,95).decision,"approve");
+});
+
+test("consistent pool prices and aggregate activity can confirm momentum without an hourly bar",()=>{
+  const history=[1,1.03,1.06].map((price,i)=>({price,liquidity:50000,at:now+i*6000,provider:"DEX"}));
+  const market={created:now-60000,liquidity:50000,volume5:5000,transactions:pair.txns};
+  assert.equal(snapshotMomentum(history,market,90,80,policy).decision,"approve");
+  assert.equal(snapshotMomentum(history,{...market,transactions:{}},90,80,policy).code,"quote-flow");
+  assert.equal(snapshotMomentum(history,{...market,liquidity:40000},90,80,policy).code,"quote-motion");
+});
+
+test("economic quoting supports executable impact above 3% while limiting net loss",async t=>{
+  const {analyzeEntryRoute}=await import("./trojan-entry.js");
+  const {mint:sol}=await import("./network.js");
+  const token="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+  let impact=".035", returned=98n;
+  t.mock.method(globalThis,"fetch",async url=>{
+    const query=new URL(url).searchParams, inputMint=query.get("inputMint"), input=BigInt(query.get("amount"));
+    return Response.json({inputMint,outputMint:query.get("outputMint"),inAmount:String(input),
+      outAmount:String(inputMint===sol?input*2n:input*returned/200n),
+      priceImpactPct:inputMint===sol?impact:".006",routePlan:[{percent:100,swapInfo:{}}]});
+  });
+  const economics={expectedPct:4,liquidity:10000,feeBps:20,slippageBps:35,lossPct:5};
+  const quote=(extra={})=>analyzeEntryRoute(token,8,{solUsd:100,checkExit:true,economics:{...economics,...extra}});
+  assert.equal((await quote()).allowed,true);
+  assert.equal((await analyzeEntryRoute(token,8,{solUsd:100,checkExit:true})).allowed,false);
+  assert.equal((await quote({expectedPct:1})).allowed,false);
+  assert.equal((await quote({expectedPct:1,observeOnly:true})).allowed,true);
+  returned=94n;
+  assert.equal((await quote({expectedPct:10})).allowed,false);
+  impact=".06";
+  assert.equal((await quote()).allowed,false);
 });
 test("calibration requires completed positions and never lowers baseline",()=>{
   const rows=[];

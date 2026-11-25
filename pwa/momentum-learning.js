@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Paper-only feedback. Shadow marks and realized position returns are kept separate.
-import { fitSignalWeights } from "./paper-signal-model.js";
+import { fitSignalWeights, fitExecutionRegimes, chronologicalSplit } from "./paper-signal-model.js";
 const horizon = 120000;
-const checkpoints = [15, 30, 60, 120, 300, 900, 3600];
-const expiry = seconds => seconds < 60 ? 12 : seconds === 60 ? 25 : seconds === 120 ? 75 : seconds === 300 ? 60 : 120;
+const checkpoints = [15,30,60,120,180,300,900,3600];
+const virtualCheckpoints = [15,30,60,120,180,300,900];
+const virtualWindow = seconds => seconds < 60 ? 10 : seconds <= 180 ? 20 : 45;
+const expiry = seconds => seconds < 60 ? 12 : seconds === 60 ? 25 : seconds === 120 ? 45 : seconds === 180 ? 30 : seconds === 300 ? 60 : 120;
 const keepLong = 20;
-const schemaVersions = new Set([1,2,3]);
+const schemaVersions = new Set([1,2,3,4]);
 const maxSamplesPerHorizon = 240;
 const maxModels = 10;
 const sampleId = row => `${row.type}:${row.key}:${row.horizon ?? 120}:${row.observedAt ?? row.at}:${Boolean(row.executable)}`;
@@ -39,10 +41,13 @@ export function mergeLearning(previous, next, now = Date.now()) {
   if (!schemaVersions.has(previous?.version)) return next;
   const samples = trimSamples([...new Map([...previous.samples, ...next.samples].map(row =>
     [sampleId(row), row])).values()]);
-  const lastLabel = new Map(), completedVirtual = new Set();
+  const lastLabel = new Map(), completedVirtual = new Map();
   for (const row of samples) if (row.type === "shadow") {
     if (row.executable) {
-      completedVirtual.add(`${row.key}:${row.observedAt}`);
+      const id=`${row.key}:${row.observedAt}`;
+      const done=completedVirtual.get(id)??new Set();
+      done.add(row.horizon);
+      completedVirtual.set(id,done);
       continue;
     }
     const previous = lastLabel.get(row.key);
@@ -50,17 +55,32 @@ export function mergeLearning(previous, next, now = Date.now()) {
     if (!previous || observedAt > previous.at || observedAt === previous.at && (row.horizon ?? 120) > previous.horizon)
       lastLabel.set(row.key,{at:observedAt,horizon:row.horizon ?? 120});
   }
-  const pending = [...new Map([...previous.pending, ...next.pending].map(row => [keyOf(row), row])).values()]
+  const mergedPending=new Map();
+  for (const row of [...previous.pending,...next.pending]) {
+    const key=keyOf(row);
+    const prior=mergedPending.get(key);
+    if (prior?.at>row.at) continue;
+    if (prior?.at===row.at && prior.virtualEntry && !row.virtualEntry) {
+      mergedPending.set(key,{...row,virtualEntry:prior.virtualEntry,virtualRemaining:prior.virtualRemaining});
+    } else if (prior?.at===row.at && prior.virtualEntry?.at===row.virtualEntry?.at &&
+        prior.virtualRemaining && row.virtualRemaining) {
+      mergedPending.set(key,{...row,virtualRemaining:row.virtualRemaining.filter(s=>prior.virtualRemaining.includes(s))});
+    } else mergedPending.set(key,row);
+  }
+  const pending=[...mergedPending.values()]
     .flatMap(row => {
       const labelled = lastLabel.get(keyOf(row));
       const remaining = (row.remaining ?? [120]).filter(seconds =>
         (!labelled || row.at > labelled.at || row.at === labelled.at && seconds > labelled.horizon) &&
         now - row.at <= (seconds + expiry(seconds))*1000);
-      return remaining.length ? [{ ...row, remaining,
-        virtualDone:row.virtualDone || completedVirtual.has(`${keyOf(row)}:${row.at}`) }] : [];
+      const completed=completedVirtual.get(`${keyOf(row)}:${row.at}`);
+      const virtualRemaining=(row.virtualRemaining??(row.virtualDone?[]:virtualCheckpoints))
+        .filter(seconds=>!completed?.has(seconds));
+      return remaining.length || row.virtualEntry && virtualRemaining.length
+        ? [{ ...row, remaining, virtualRemaining }] : [];
     }).sort((a,b) => a.at-b.at).slice(-maxPending);
-  return { version: 3, samples, pending, paperKeys: [...new Set([...previous.paperKeys, ...next.paperKeys])].slice(-200),
-    models: mergeModels(previous.version===3 ? previous.models ?? [] : [],next.models ?? []) };
+  return { version:4,samples,pending,paperKeys:[...new Set([...previous.paperKeys,...next.paperKeys])].slice(-200),
+    models:mergeModels(previous.version>=3 ? previous.models??[] : [],next.models??[]) };
 }
 
 export function paperLearning(snapshot, policy) {
@@ -75,16 +95,16 @@ export function paperLearning(snapshot, policy) {
   const slipFloor = policy.slippageBps / 10000;
   let generation = 0;
   let savedGeneration = 0;
-  let models = snapshot?.version===3 ? snapshot.models?.slice(-maxModels) ?? [] : [];
+  let models = snapshot?.version>=3 ? snapshot.models?.slice(-maxModels) ?? [] : [];
   let lastTraining = 0;
-  let lastModelSignature = JSON.stringify(models.at(-1)?.weights ?? {});
+  let lastModelSignature = JSON.stringify([models.at(-1)?.weights??{},models.at(-1)?.regimes??{}]);
   const rollback = policy.momentumRollback === 1;
   const previousModel = models.at(-2) ?? {id:"baseline", settings:undefined, weights:{}};
   const activeModel = () => rollback ? previousModel : models.at(-1);
 
   function append(sample) {
     samples.push(sample);
-    if (samples.length > 1920) samples = trimSamples(samples);
+    if (samples.length > 2500) samples = trimSamples(samples);
     generation++;
   }
 
@@ -99,24 +119,33 @@ export function paperLearning(snapshot, policy) {
       const row=pending.get(keyOf(market));
       return Boolean(row?.missed && row.verified && row.calibratable && !row.virtualEntry && now-row.at<=15000);
     },
-    proveRoute(market, proof, at) {
+    proveRoute(market, proof, at, missed = false) {
       const row=pending.get(keyOf(market));
       const positiveInteger=value=>typeof value==="string" && /^[1-9]\d{0,19}$/.test(value);
       if (!row?.verified || !row.calibratable || row.virtualEntry || !(at >= row.at && at-row.at <= 15000) ||
           !(proof?.quoteUsd > 0) || !(proof.entrySlip>=0 && proof.entrySlip<=.01) ||
           !positiveInteger(proof.inLamports) || !positiveInteger(proof.tokenRaw)) return;
       row.virtualEntry={...proof,at};
+      row.virtualRemaining=[...virtualCheckpoints];
+      row.missed ||= missed;
       generation++;
     },
     virtualDue(now) {
-      return [...pending.values()].filter(row=>row.virtualEntry && !row.virtualDone &&
-        now-row.virtualEntry.at>=horizon && now-row.virtualEntry.at<=horizon+20000)
-        .sort((a,b)=>a.virtualEntry.at-b.virtualEntry.at);
+      return [...pending.values()].flatMap(row=>{
+        if (!row.virtualEntry) return [];
+        const elapsed=(now-row.virtualEntry.at)/1000;
+        const next=(row.virtualRemaining??(row.virtualDone?[]:[120])).findLast(s=>elapsed>=s && elapsed<=s+virtualWindow(s));
+        return next===undefined ? [] : [{...row,next,expires:row.virtualEntry.at+(next+virtualWindow(next))*1000}];
+      }).sort((a,b)=>a.expires-b.expires);
     },
     finishVirtual(market, quote, at, solUsd) {
       const row=pending.get(keyOf(market)), entry=row?.virtualEntry;
-      if (!entry || row.virtualDone || at-entry.at<horizon || at-entry.at>horizon+20000) return false;
-      row.virtualDone=true;
+      if (!entry) return false;
+      const elapsed=(at-entry.at)/1000;
+      const remaining=row.virtualRemaining??(row.virtualDone?[]:[120]);
+      const next=market.next??remaining.findLast(s=>elapsed>=s && elapsed<=s+virtualWindow(s));
+      if (!remaining.includes(next) || elapsed<next || elapsed>next+virtualWindow(next)) return false;
+      row.virtualRemaining=remaining.filter(seconds=>seconds>next);
       generation++;
       // Route outputs already incorporate pool fees and price impact. Apply
       // the quoted slippage allowance and local fee budget conservatively.
@@ -127,7 +156,7 @@ export function paperLearning(snapshot, policy) {
       const cost=Number(entry.inLamports)*entry.quoteUsd*(1+Math.max(slipFloor,entry.entrySlip))*(1+feeFloor);
       if (!(proceeds>0 && cost>0 && Number.isFinite(proceeds/cost))) return false;
       append({type:"shadow", executable:true, key:keyOf(market), track:row.track, score:row.score, calibratable:true,
-        verified:true,features:row.features,segment:row.segment,observedAt:row.at,horizon:120,missed:row.missed,
+        verified:true,features:row.features,segment:row.segment,observedAt:row.at,horizon:next,missed:row.missed,
         net:proceeds/cost-1,at});
       return true;
     },
@@ -148,16 +177,22 @@ export function paperLearning(snapshot, policy) {
       }
       const long = calibratable && [...pending.values()].filter(row => row.remaining.some(seconds=>seconds>=900)).length < keepLong;
       const { token, pool, price, liquidity } = market;
-      pending.set(key, { token, pool, price, liquidity, at: now, track, score, calibratable, verified, ...context, remaining: long ? [...checkpoints] : checkpoints.slice(0,5) });
+      pending.set(key,{token,pool,price,liquidity,at:now,track,score,calibratable,verified,...context,
+        remaining:long?[...checkpoints]:checkpoints.filter(s=>s<=300)});
       generation++;
     },
     due(now) {
       const ready = [];
       for (const [key, sample] of pending) {
         const remaining = sample.remaining.filter(seconds => now - sample.at <= (seconds + expiry(seconds))*1000);
+        if (!remaining.length && !sample.virtualRemaining?.some(seconds=>
+          now-sample.virtualEntry?.at <= (seconds+virtualWindow(seconds))*1000)) {
+          pending.delete(key);
+          generation++;
+          continue;
+        }
         if (remaining.length !== sample.remaining.length) {
           generation++;
-          if (!remaining.length) { pending.delete(key); continue; }
           sample.remaining = remaining;
         }
         const next = remaining.find(seconds => now - sample.at >= seconds*1000);
@@ -174,7 +209,7 @@ export function paperLearning(snapshot, policy) {
       const window = sample.remaining.findLast(seconds => elapsed >= seconds && elapsed <= seconds + expiry(seconds));
       if (window === undefined) return false;
       sample.remaining = sample.remaining.filter(seconds => seconds > window);
-      if (!sample.remaining.length) pending.delete(key);
+      if (!sample.remaining.length && (!sample.virtualEntry || !sample.virtualRemaining?.length)) pending.delete(key);
       const ticket = Math.min(policy.orderUsd, policy.momentumMaxUsd);
       const entrySlip = Math.max(slipFloor, ticket / (sample.liquidity / 2 + ticket));
       const exitSlip = Math.max(slipFloor, ticket / (market.liquidity / 2 + ticket));
@@ -201,37 +236,39 @@ export function paperLearning(snapshot, policy) {
         if (paperKeys.has(fillKey) || !(entry.notional > 0) || !Number.isFinite(entry.score)) continue;
         paperKeys.add(fillKey);
         if (paperKeys.size > 200) paperKeys.delete(paperKeys.values().next().value);
-        append({ type: "paper", key, track: entry.track ?? "rolling", score: entry.score, features:entry.features, segment:entry.segment, net: entry.pnl / entry.notional, at: trade.at });
+        append({type:"paper",key,track:entry.track??"rolling",score:entry.score,features:entry.features,segment:entry.segment,
+          net:entry.pnl/entry.notional,observedAt:entry.at,at:trade.at});
       }
     },
     calibration(anchor, now) {
       const tracks = {};
       for (const track of allowedTracks) {
         const recent = samples.filter(s => s.track === track && s.at >= now - 86400000 && s.at <= now);
-        const paper = recent.filter(s => s.type === "paper");
+        const paper=[...new Map(recent.filter(s=>s.type==="paper").map(s=>[s.key,s])).values()];
         const shadow = [...new Map(recent.filter(s =>
-          s.type === "shadow" && s.executable && s.horizon === 120 && s.calibratable && s.verified &&
+          s.type === "shadow" && s.executable && [120,180].includes(s.horizon) && s.calibratable && s.verified &&
           s.score >= anchor - 8 && s.score < anchor + 4
         ).map(s => [s.key, s])).values()].sort((a,b)=>a.at-b.at);
         const mean = rows => rows.reduce((sum,row) => sum + Math.max(-.15, Math.min(.15, row.net)), 0) / rows.length;
         const wins = rows => rows.filter(s => s.net > 0).length / rows.length;
-        const split = Math.floor(shadow.length*2/3);
-        const supported = condition => shadow.length>=18 && condition(shadow.slice(0,split)) && condition(shadow.slice(split));
-        const offset = paper.length >= 12 && mean(paper) < -.005 ? 6
-          : supported(rows=>mean(rows)<-.01) ? 3
-          : supported(rows=>wins(rows)>=.65 && mean(rows)>.02) ? -4 : 0;
+        const supported=(data,minimum,condition)=>data.length>=minimum &&
+          chronologicalSplit(data).every(rows=>rows.length>=6 && condition(rows));
+        const offset = supported(paper,24,rows=>mean(rows)<-.005) ? 6
+          : supported(shadow,18,rows=>mean(rows)<-.01) ? 3
+          : supported(shadow,18,rows=>wins(rows)>=.65 && mean(rows)>.02) ? -4 : 0;
         tracks[track] = { threshold: scoreBand(anchor, anchor + offset), shadow: shadow.length, paper: paper.length };
       }
       if (!rollback && now - lastTraining >= 300000) {
         lastTraining = now;
         const weights = fitSignalWeights(samples, now);
-        const signature = JSON.stringify(weights);
+        const regimes=fitExecutionRegimes(samples,now);
+        const signature = JSON.stringify([weights,regimes]);
         const lastSettings = models.at(-1)?.settings;
         const settings = Object.fromEntries(Object.entries(tracks).map(([track,row])=>[track,row.threshold-anchor]));
         const previousSettings = lastSettings ?? {rolling:0,short:0,early:0};
         if (signature !== lastModelSignature || JSON.stringify(settings) !== JSON.stringify(previousSettings)) {
           lastModelSignature = signature;
-          models = mergeModels(models, [{id:now, at:now, settings, weights}]);
+          models = mergeModels(models, [{id:now, at:now, settings, weights, regimes}]);
           generation++;
         }
       }
@@ -241,16 +278,19 @@ export function paperLearning(snapshot, policy) {
       }
       const checkpointCounts = {};
       for (const row of samples) if (row.type === "shadow" && !row.executable) checkpointCounts[row.horizon ?? 120] = (checkpointCounts[row.horizon ?? 120] ?? 0) + 1;
-      return { tracks, weights: model?.weights ?? {}, modelRevision: model?.id ?? "baseline", rollback,
+      const executableCounts={};
+      for (const row of samples) if (row.executable) executableCounts[row.horizon]=(executableCounts[row.horizon]??0)+1;
+      return { tracks, weights: model?.weights ?? {}, regimes:model?.regimes??{}, modelRevision: model?.id ?? "baseline", rollback,
         versions: models.length, checkpointCounts,
-        missed: samples.filter(row => row.type === "shadow" && row.executable && row.missed && row.net > 0).length,
+        missed: new Set(samples.filter(row => row.type === "shadow" && row.executable && row.missed && row.net > 0).map(row=>row.key)).size,
         executable: samples.filter(row=>row.executable).length,
+        executableCounts,
         shadow: samples.filter(s => s.type === "shadow").length,
         paper: samples.filter(s => s.type === "paper").length, pending: pending.size };
     },
     get dirty() { return generation !== savedGeneration; },
     get generation() { return generation; },
     saved(version) { savedGeneration = version; },
-    snapshot: () => ({ version: 3, samples: trimSamples([...samples]), pending: [...pending.values()], paperKeys: [...paperKeys], models })
+    snapshot: () => ({ version:4,samples:trimSamples([...samples]),pending:[...pending.values()],paperKeys:[...paperKeys],models })
   };
 }

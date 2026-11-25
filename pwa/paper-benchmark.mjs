@@ -116,13 +116,13 @@ try {
       return book;
     },
     saveLearning: async state => { learned = state; },
-    diagnostic({ token, stage, outcome, reason, score, strategyCode, provider }) {
+    diagnostic({ token, stage, outcome, reason, score, strategyCode, provider, evidence }) {
       if (trace) {
-        const key=`${token}:${stage}`, value=`${outcome}:${reason??""}:${provider??""}`;
+        const key=`${token}:${stage}`, value=`${outcome}:${reason??""}:${provider??""}:${evidence?JSON.stringify(evidence):""}`;
         if (lastDiagnostic.get(key)!==value) {
           if (lastDiagnostic.size>=24000) lastDiagnostic.delete(lastDiagnostic.keys().next().value);
           lastDiagnostic.set(key,value);
-          appendFileSync(trace,JSON.stringify({event:"stage",at:Date.now(),token,stage,outcome,reason,score,strategyCode,provider})+"\n");
+          appendFileSync(trace,JSON.stringify({event:"stage",at:Date.now(),token,stage,outcome,reason,score,strategyCode,provider,evidence})+"\n");
         }
       }
       if (phases.includes(stage)) {

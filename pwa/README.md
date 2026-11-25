@@ -186,3 +186,13 @@ SCREENER_BENCH_SECONDS=3605 SCREENER_BENCH_LEARNING=/tmp/paper-learning.json \
   SCREENER_BENCH_TRACE=/tmp/paper-stage-trace.jsonl \
   node --use-env-proxy pwa/paper-benchmark.mjs > /tmp/paper-funnel.jsonl
 ```
+
+#### Paper Momentumin toteutuskoko ja aikajärjestyksessä kalibroitu malli
+
+Momentum tarkastelee dokumentoituja kauppaikkunoita ja samasta poolista sekä lähteestä saatuja aikaleimattuja hintahavaintoja. Hintojen nousu tarvitsee tuekseen mitattua toteumavolyymia ja ostopainetta. Eri lähteistä saatuja hintatasoja ei yhdistetä hetkelliseksi tuotoksi. Jokaisen rolling-suodattimen osuma tallennetaan tuntiajon vaihelogiin.
+
+Kaksisuuntainen Jupiter-tarjous pyydetään Paper-saldon, pisteiden ja likviditeetin perusteella mitoitetulle ostolle. Tarjous voi käynnistää yhden pienemmän kokovertailun. Varaus estää Paper-salkkua ostamasta varmennettua määrää suurempaa positiota. Osto tarkistaa edestakaisen reitin kulut, liukuman, arvioidun nettoliikkeen ja ehdottomat vaikutusrajat. Potentiaalinen tuotto on havaittuun liikkeeseen perustuva arvio. Paper-voiton kotiuttaminen tarkistaa myyntitarjouksen nettotuoton. Riskipoistumiset, päiväkohtainen tappioraja ja kokonaisaltistus pysyvät erillään arviosta.
+
+Varmennetulla virtuaalisella sisääntulolla voidaan pyytää myyntitarjouksia 15, 30, 60, 120, 180, 300 ja 900 sekunnin kohdalla. Suora hintaseuranta säilyy laajemmalla otoksella. Ajallaan saatua erillistä myyntitarjousta käytetään koulutuksessa täsmälleen alkuperäisen tokenimäärän mukaan. Paper-saldon ulkopuoliseen toteutusaineistoon merkitään myös nettoliikkeen ennusteen vuoksi ohitettu ehdokas, jos reitin ehdottomat ehdot ja turvatarkastukset täyttyvät.
+
+Painojen, koon ja poistumisen mukautus edellyttää eri pooleista saatua koulutus- ja vertailuaineistoa. Analyysiajat ovat kronologisessa järjestyksessä ja ennen vertailun alkua valmistuneet tulokset muodostavat koulutusaineiston. Otoksen koon tai tulosten puuttuessa käytetään lähtöasetuksia. Vanha Paper-kirja ja toteumat ovat edelleen käytettävissä.

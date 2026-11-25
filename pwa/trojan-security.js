@@ -9,20 +9,20 @@ const levels = {
   medium: "medium", info: "low", low: "low"
 };
 const disabledAuthority = "11111111111111111111111111111111";
+const severity = { low:0, medium:1, unknown:2, high:3 };
+const riskKey = reason => /^(mutable metadata|metadatan päivitysvaltuus|token metadata update authority (is )?active)$/i.test(reason.trim())
+  ? "metadata-authority" : reason.trim().toLowerCase();
 
 export function fullRugCheck(data, { scoreLimit = 40, minHolders = 0, minLPProviders = 0,
   minPumpLock = 0, minRegularLock = 0, maxTopHolder = 50, maxTop10 = 80,
   maxTop3 = 85, maxCreator = 20, maxMedium = 3, maxInsiders = 10,
   maxInsiderPct = 100, maxGraphShare = 100, requireGraph = false } = {}) {
-  const reasons = [];
-  let high = 0;
-  let medium = 0;
-  let unknown = 0;
+  const findings = new Map();
   function risk(level, reason) {
-    if (level === "high") high++;
-    if (level === "medium") medium++;
-    if (level === "unknown") unknown++;
-    if (level !== "low") reasons.push(reason);
+    if (level === "low") return;
+    const code=riskKey(reason);
+    const previous=findings.get(code);
+    if (!previous || severity[level]>severity[previous.level]) findings.set(code,{code,level,reason});
   }
   const score = numeric(data?.score_normalised);
   if (score === null || score < 0 || score > 100) risk("unknown", "RugCheck-pisteet puuttuvat tai ovat virheelliset");
@@ -37,11 +37,11 @@ export function fullRugCheck(data, { scoreLimit = 40, minHolders = 0, minLPProvi
   const mint = { ...data, ...data?.token };
   for (const name of ["mintAuthority", "freezeAuthority"]) {
     const authority = mint[name];
-    if (authority === true || (typeof authority === "string" && authority)) risk("high", `${name} aktiivinen`);
-    else if (!Object.hasOwn(mint, name) || ![null, false, ""].includes(authority)) risk("unknown", `${name} puuttuu`);
+    if (authority === true || (typeof authority === "string" && authority && authority!==disabledAuthority)) risk("high", `${name} aktiivinen`);
+    else if (!Object.hasOwn(mint, name) || ![null, false, "",disabledAuthority].includes(authority)) risk("unknown", `${name} puuttuu`);
   }
   const update = data?.tokenUpdateAuthority ?? data?.updateAuthority ?? mint.updateAuthority ?? data?.tokenMeta?.updateAuthority;
-  if (update) risk("medium", "Metadatan päivitysvaltuus");
+  if (update && update!==disabledAuthority) risk("medium", "Metadatan päivitysvaltuus");
   const holders = (Array.isArray(data?.topHolders) ? data.topHolders : [])
     .map(row => ({ row, pct: percentage(row?.pct) })).filter(item => item.pct !== null)
     .sort((a, b) => b.pct - a.pct);
@@ -102,6 +102,10 @@ export function fullRugCheck(data, { scoreLimit = 40, minHolders = 0, minLPProvi
   // legacy SPL mints where the transfer-fee extension does not exist.
   const feeAuthority = data?.transferFeeAuthority ?? data?.transferFee?.authority;
   if (feeAuthority && feeAuthority !== disabledAuthority) risk("medium", "Siirtomaksuvaltuus aktiivinen");
+  const evidence=[...findings.values()];
+  const countGrade=level=>evidence.filter(row=>row.level===level).length;
+  const high=countGrade("high"), medium=countGrade("medium"), unknown=countGrade("unknown");
   return { status: high || medium >= maxMedium ? "reject" : unknown ? "watch" : "approve",
-    reasons, score, top, top10Pct, top3, creatorPct, lock, liquidity, high, medium, unknown };
+    reasons:evidence.map(row=>row.reason), findings:evidence,
+    score, top, top10Pct, top3, creatorPct, lock, liquidity, high, medium, unknown };
 }

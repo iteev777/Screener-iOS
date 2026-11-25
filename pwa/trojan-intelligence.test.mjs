@@ -33,6 +33,16 @@ test("RugCheck distinguishes its disabled authority sentinel from a fee or graph
   assert.equal(fullRugCheck({...safe(),transferFee,graphInsidersDetected:3}).status,"reject");
 });
 
+test("equivalent metadata findings count once, while separate severe risks remain blocking",()=>{
+  const report={...safe(),updateAuthority:"enabled",risks:[
+    {name:"Mutable metadata",level:"warn"},{name:"Mutable metadata",level:"warn"}]};
+  assert.equal(fullRugCheck(report).medium,1);
+  assert.equal(fullRugCheck(report).status,"approve");
+  assert.equal(fullRugCheck({...report,graphInsidersDetected:3}).status,"reject");
+  const {freezeAuthority,...partial}=report.token;
+  assert.equal(fullRugCheck({...report,token:partial}).status,"watch");
+});
+
 test("pool decoder enforces owner, discriminator, status and RPC mint binding", async t => {
   const bytes = new Uint8Array(413);
   bytes.set([247, 237, 227, 245, 215, 195, 222, 70]);

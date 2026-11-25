@@ -7,7 +7,7 @@ import { copyGroup } from "./copy.js";
 import { analystWorker } from "./candidate-analyst.js";
 import { marketTape, preferMarket, completeTape } from "./market-tape.js";
 import { poolStream } from "./pool-stream.js";
-import { momentumExit, momentumSize, shortMomentum, momentumSignal, earlyMomentum } from "./momentum.js";
+import { momentumExit, momentumBudget, momentumPayoff, shortMomentum, momentumSignal, earlyMomentum, snapshotMomentum } from "./momentum.js";
 import { fullRugCheck } from "./trojan-security.js";
 import { analyzeCounterfactualExit, analyzeEntryRoute } from "./trojan-entry.js";
 import { verifyPools, verifyPoolReserves, estimateBinSwap, estimateTickSwap } from "./trojan-pools.js";
@@ -95,15 +95,21 @@ export function mintEligible(account) {
 function mintVerification(account) {
   if (!account) return {ok:null,reason:"Minttitili puuttuu vahvistetusta RPC-vastauksesta"};
   const data = account?.data?.parsed;
-  if (data?.type !== "mint" || data.info?.isInitialized !== true)
+  if (!data?.info || !Object.hasOwn(data.info,"isInitialized"))
+    return {ok:null,reason:"RPC:n mintin kentät puuttuvat"};
+  if (data.type !== "mint" || data.info.isInitialized !== true)
     return {ok:false,reason:"SPL-minttitili on alustamaton tai virheellinen"};
-  if (data.info.mintAuthority !== null) return {ok:false,reason:"Minttausvaltuus on aktiivinen tai tuntematon"};
-  if (data.info.freezeAuthority !== null) return {ok:false,reason:"Jäädytysvaltuus on aktiivinen tai tuntematon"};
+  for (const [field,label] of [["mintAuthority","Minttausvaltuus"],["freezeAuthority","Jäädytysvaltuus"]]) {
+    const key=data.info[field];
+    if (key===null) continue;
+    if (typeof key==="string" && address.test(key)) return {ok:false,reason:`${label} on aktiivinen`};
+    return {ok:null,reason:`${label} vahvistamatta RPC:ssä`};
+  }
   if (account.owner === classicTokenProgram) return {ok:true};
   if (account.owner !== tokenProgram2022) return {ok:false,reason:"Mintin omistava ohjelma ei ole tuettu SPL Token"};
   // Token-2022 allows extensions that can freeze or change balances. Only the
   // two metadata extensions are admitted. RugCheck still validates metadata risks.
-  if (!Array.isArray(data.info.extensions)) return {ok:false,reason:"Token-2022-laajennusten tiedot puuttuvat"};
+  if (!Array.isArray(data.info.extensions)) return {ok:null,reason:"Token-2022-laajennusten tiedot puuttuvat"};
   const unsupported=data.info.extensions.filter(row=>!["metadataPointer","tokenMetadata"].includes(row?.extension));
   return unsupported.length ? {ok:false,reason:`Token-2022-riskilaajennus: ${unsupported.map(row=>row?.extension??"tuntematon").join(", ").slice(0,160)}`} : {ok:true};
 }
@@ -168,9 +174,9 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
       const trojan = selectedStrategy >= 5;
       const momentum = selectedStrategy === 8;
       const profilePolicy = strategySettings(policy, selectedStrategy);
-      const orderUsd = momentum ? momentumSize(book.cash, tick.score, tick.liquidity, {
-        ...policy, momentumScore: scoreBand(policy.momentumScore, tick.scoreFloor), orderUsd: Math.min(policy.orderUsd, book.cash * (policy.balanceFraction ?? 10) / 100)
-      }) : trojan ? Math.round(Math.min(profilePolicy.orderUsd, book.cash * (policy.balanceFraction ?? 10) / 100) * 100) / 100 : policy.orderUsd;
+      const size=momentum ? momentumBudget(book.cash,tick.score,tick.liquidity,scoreBand(policy.momentumScore,tick.scoreFloor),policy,tick.riskScale) : 0;
+      const orderUsd = momentum ? Math.min(size,tick.quotedBudget??Infinity)
+        : trojan ? Math.round(Math.min(profilePolicy.orderUsd, book.cash * (policy.balanceFraction ?? 10) / 100) * 100) / 100 : policy.orderUsd;
       const executionPolicy = trojan ? { ...profilePolicy, strategy: selectedStrategy, orderUsd, lossUsd: policy.lossUsd } : policy;
       const signal = tick.manual ? 0 : decide(tick, book);
       let order = position && tick.manual ? { side: "Myynti", sol: book.sol, reason: 10, detail: "Käyttäjä sulki paperiposition" }
@@ -234,6 +240,7 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
         portfolio.positions[key] = { strategy: selectedStrategy, sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool,
           name: tick.name ?? position?.name, track: tick.track ?? position?.track, segment:tick.segment ?? position?.segment, features:tick.features ?? position?.features, score: tick.score ?? position?.score,
           entryReason: position?.entryReason ?? tick.analysisReason,
+          exitPlan:position?.exitPlan??tick.exitPlan,
           worst: Math.min(position?.worst ?? tick.price, tick.price),
           liquidity: tick.liquidity, change5: tick.change5, lastTradeAt, peak: Math.max(book.peak ?? tick.price, tick.price), mark: tick.price,
           lastTickAt: tick.at, market: { token: tick.token, pool: tick.pool, symbol: tick.symbol,
@@ -615,6 +622,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         for (const [token, value] of cache) if (value.expires <= now) cache.delete(token);
       }
       if (momentum) {
+        if (diagnostic) for (const row of ranked) {
+          for (const [gate,blocked] of Object.entries(row.strategy?.gates??{})) {
+            diagnostic({token:row.item.token,stage:`rolling-filter/${gate}`,outcome:blocked?"watch":"approve",reason:blocked?gate:undefined});
+          }
+        }
         const promising = ranked.filter(row => row.pair && row.quality?.tier !== "reject" &&
           row.decision !== "reject" && row.pair.market.liquidity >= policy.minLiquidity);
         const target = promising.filter(row => tape.canTrade(row.pair.market.pool, row.item.token, now))
@@ -633,8 +645,10 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           const position = positionKey(market);
           const previous = depthHistory.get(position);
           if (!previous || observedAt > previous.at) {
+            const quotes=[...(previous?.quotes??[]).filter(row=>observedAt-row.at<=60000),
+              {at:observedAt,provider:row.pair.provider,price:market.price,liquidity:market.liquidity}].slice(-12);
             depthHistory.set(position, { at: observedAt, liquidity: market.liquidity,
-              previous: previous && observedAt - previous.at <= 30000 ? previous.liquidity : undefined });
+              previous: previous && observedAt - previous.at <= 30000 ? previous.liquidity : undefined,quotes });
           }
           const depth = depthHistory.get(position);
           const windows = shortMomentum(tape.trades(market.pool, market.token), now);
@@ -646,8 +660,9 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
             const score = structural ? learnedScore(calibration?.weights,track,segment,features,strategy.score) : strategy.score;
             const scoreFloor = threshold(track);
             const decision = structural ? score >= scoreFloor ? "approve" : "watch" : strategy.decision;
+            const regime=calibration?.regimes?.[`${track}/${segment}`];
             return { ...strategy, decision, code: structural && decision === "watch" ? "score" : strategy.code,
-              score, track, scoreFloor, segment, features };
+              score,track,scoreFloor,segment,features,regime,expectedPct:momentumPayoff(market,strategy.observedMove,window,policy,regime) };
           };
           const rolling = withEvidence(row.strategy, "rolling", ["score","signal"].includes(row.strategy.code));
           const shortSignal = momentumSignal(windows,row.quality.score,threshold("short"));
@@ -655,8 +670,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           const earlySignal = earlyMomentum(windows,market,row.quality.score,threshold("early"),policy,depth?.previous);
           const early = withEvidence({ ...earlySignal, shortVolume:recent?.volume }, "early",
             earlySignal.code === "early-flow" || earlySignal.code === "score", fastEvidence);
+          const snapshot=snapshotMomentum(depth?.quotes??[],market,row.quality.score,threshold("short"),policy);
+          const quoteSignal=withEvidence(snapshot,"short",snapshot.structural,snapshot.window);
           diagnostic?.({token:market.token,stage:"early-tape",outcome:early.decision,reason:early.reason,score:early.score});
-          const options = [rolling, short, early];
+          diagnostic?.({token:market.token,stage:"quote-signal",outcome:quoteSignal.decision,reason:quoteSignal.reason,score:quoteSignal.score});
+          const options = [rolling, short, early,quoteSignal];
           const weakFlow = rolling.code === "buy-pressure" && Number.isFinite(market.transactions?.m5?.buys) &&
             market.transactions.m5.buys < market.transactions.m5.sells;
           const calibrated = options.filter(pick => pick.decision === "approve" && (pick.track === "rolling" || !weakFlow))
@@ -672,7 +690,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
               {features:observation.features, segment:observation.segment, missed:!calibrated});
             if (measurable && !weakFlow) learning.proveSafety(market, safe);
             if (!weakFlow && observation.code === "score" && observation.score >= policy.momentumScore - 8) {
-              if (safe && !virtualCandidate && learning.routeWanted(market,now)) virtualCandidate = row;
+              if (safe && !virtualCandidate && learning.routeWanted(market,now)) virtualCandidate = {...row,strategy:observation};
               else if (now >= nextShadowSafety && !shadowCandidate && !safe &&
                   mintCache.get(market.token)?.ok !== false && rugCache.get(market.token)?.ok !== false) shadowCandidate = row;
             }
@@ -742,6 +760,8 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
             const suffix = policy.strategy >= 5 ? "report" : "report/summary";
             const raw = await fetchJson(`https://api.rugcheck.xyz/v1/tokens/${item.token}/${suffix}`, {}, signal);
             const check = policy.strategy >= 5 ? fullRugCheck(raw, { scoreLimit: rugCeiling }) : null;
+            if (check) diagnostic?.({token:item.token,stage:"rug-evidence",outcome:check.status,
+              reason:check.reasons.join(" · "),evidence:check.findings});
             rugCache.set(item.token, { ok: check ? check.status === "approve" ? true :
               check.status === "watch" ? null : false : rugEligible(raw, rugCeiling),
               reason: check?.reasons.join("; ").slice(0, 200), expires: Date.now() + (check?.status === "watch" ? 30000 : 300000) });
@@ -776,24 +796,44 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
             } else {
               if (momentum) solQuote = await resolver.solPrice();
               else if (!solQuote || Date.now() - solQuote.at > 15000) solQuote = await currentMarket(signal);
-              const orderUsd = policy.strategy === 8 ? Math.min(policy.momentumMaxUsd, policy.orderUsd)
+              const plan=next.strategy;
+              let orderUsd = momentum ? momentumBudget((await load()).cash,plan.score,market.liquidity,
+                Math.min(plan.score,plan.scoreFloor??policy.momentumScore),policy,plan.regime?.scale)
                 : strategySettings(policy, next.profile === "sniper" ? 6 : 5).orderUsd;
+              if (!(orderUsd>0)) throw new Error("Laskettu Paper-positio alittaa vähimmäiskoon");
               const depth = momentum ? null : assessEntryDepth(pool,market,orderUsd,solQuote.price,policy[next.profile+"MaxImpact"]??5);
               if(depth?.status==="reject"||depth?.status==="watch"){
                 routeCache.set(positionKey(market),{...depth,stage:"pool",expires:Date.now()+15000});
               } else {
-              const route = await analyzeEntryRoute(market.token, orderUsd, {
+              const initialBudget=orderUsd;
+              const economics=momentum?{expectedPct:plan.expectedPct,liquidity:market.liquidity,
+                feeBps:policy.feeBps,slippageBps:Math.max(policy.slippageBps,35),lossPct:policy.momentumStop??5,
+                observeOnly:next.decision!=="approve"}:undefined;
+              const options={
                 signal, solUsd: solQuote.price, apiKey: jupiterKey, taker: simulationWallet || undefined,
-                slippageBps: 100, checkExit: policy.strategy === 8, requestQuote
-              });
+                slippageBps:momentum?Math.max(35,Math.min(100,policy.slippageBps)):100,checkExit:momentum,economics,requestQuote
+              };
+              let route=await analyzeEntryRoute(market.token,orderUsd,options);
+              const smaller=Math.floor(orderUsd*.5*100)/100;
+              if (momentum && route.resize && smaller>=policy.momentumMinUsd && Date.now()>=nextQuote-1100) {
+                diagnostic?.({token:market.token,stage:"route-size",outcome:"retry",reason:route.reason,
+                  evidence:{orderUsd,smaller,roundTripBps:route.roundTripBps}});
+                orderUsd=smaller;
+                route=await analyzeEntryRoute(market.token,orderUsd,options);
+                diagnostic?.({token:market.token,stage:"route-size",outcome:route.allowed?"approve":"reject",
+                  reason:route.reason,evidence:{initialBudget,orderUsd,net:route.expectedNetPct}});
+              }
               const checkedAt = Date.now();
               const outcome = route.allowed ? "approve" : "reject";
               const reason = `${route.reason} (${route.score}/100)${route.simulation ? ` · simulaatio ${route.simulation}` : ""}`;
               routeCache.set(routeKey, { status:outcome, entryImpactPct:route.impact, roundTripBps:route.roundTripBps,
-                proof:route.proof, solUsd:solQuote.price, orderUsd,
+                proof:route.proof,solUsd:solQuote.price,orderUsd,lossPct:route.lossPct,expectedNetPct:route.expectedNetPct,
+                buyImpact:route.buyImpact,sellImpact:route.sellImpact,feeBps:route.feeBps,
                 reason:momentum ? reason : `${pool.protocol} · ${depth.reason} · ${reason}`,
-                checkedAt, expires:checkedAt+(route.allowed?8000:30000) });
-              diagnostic?.({token:market.token,stage:"preflight",outcome,reason});
+                checkedAt,expires:checkedAt+(route.allowed?8000:12000) });
+              diagnostic?.({token:market.token,stage:"preflight",outcome,reason,
+                evidence:{orderUsd,buyImpact:route.buyImpact??route.impact,sellImpact:route.sellImpact,
+                  cost:route.lossPct,feeBps:route.feeBps,net:route.expectedNetPct}});
               }
             }
           } catch (error) {
@@ -859,6 +899,9 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
                   } else if (!(quotePrice=routeEntryPrice(route,pair.market,pool))) {
                     checked="watch";
                     reason="Jupiterin tarjoushinta ei täsmää analysoituun pooliin tai mintin desimaalit puuttuvat";
+                  } else if ((1-route.lossPct/100)*(1+strategy.expectedPct/100)<1.0015) {
+                    checked="watch";
+                    reason="Signaalin odotettu nettoliike heikkeni tarjouksen jälkeen";
                   } else {
                     stage="eligible";
                     route={...route,expires:Math.min(route.expires,pool.expires)};
@@ -876,10 +919,10 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           }
         } else if (quality?.tier === "reject") reason = "Virheellinen markkinadata";
         if (momentum && pair && authority === true && rug === true && pool?.status === "approve" &&
-            pool.expires>Date.now() && route?.status === "approve") {
+            pool.expires>Date.now() && route?.proof) {
           const depth=assessEntryDepth(pool,pair.market,route.orderUsd,route.solUsd,policy[profile+"MaxImpact"]??5);
           if (depth.status === "pass" && routeEntryPrice(route,pair.market,pool)) {
-            learning.proveRoute(pair.market,route.proof,route.checkedAt);
+            learning.proveRoute(pair.market,route.proof,route.checkedAt,route.status==="reject");
           }
         }
         if (momentum && decision === "approve" && ["mint","rug","pool"].includes(stage)) {
@@ -899,7 +942,8 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         }
         const sameReason = item.reason === reason;
         item.reason = reason;
-        const retryDelay = momentum && checked === "watch" && stage === "market"
+        const retryDelay = momentum && stage==="route" && route?.status==="reject" ? Math.max(1000,route.expires-now)
+          : momentum && checked === "watch" && stage === "market"
           ? Math.min(45000, (item.sources.has("PumpPortal") ? 5000 : 10000) *
             2 ** Math.min(sameReason ? item.streak ?? 0 : 0, 3))
           : undefined;
@@ -910,7 +954,10 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         }
         if (checked === "approve") {
           if (route) item.due = Math.min(item.due, route.expires);
-          candidates.push({ ...pair.market, provider:pair.provider, decimals:poolTokenDecimals(pool,item.token), score: strategy?.score, scoreFloor: strategy?.scoreFloor, track: strategy?.track, segment:strategy?.segment, features:strategy?.features, shortVolume: strategy?.shortVolume, analysisReason: strategy?.reason, verification: reason, tradeStrategy: policy.strategy === 8 ? 8 : policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: pair.observedAt, priority: item.priority, routeExpires: route?.expires, signalAt: route?.checkedAt, entryImpactPct: route?.entryImpactPct, entryQuotePrice:quotePrice });
+          const exitPlan=momentum?{costPct:route.lossPct,payoffPct:strategy.expectedPct,
+            holdSeconds:strategy.regime?.holdSeconds??(strategy.track==="rolling"?240:120),
+            profitScale:strategy.regime?.profitScale??1}:undefined;
+          candidates.push({ ...pair.market, provider:pair.provider, decimals:poolTokenDecimals(pool,item.token), score: strategy?.score, scoreFloor: strategy?.scoreFloor, track: strategy?.track, segment:strategy?.segment, features:strategy?.features, shortVolume: strategy?.shortVolume, analysisReason: strategy?.reason, verification: reason, tradeStrategy: policy.strategy === 8 ? 8 : policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: pair.observedAt, priority: item.priority, routeExpires: route?.expires, signalAt: route?.checkedAt, entryImpactPct: route?.entryImpactPct, entryQuotePrice:quotePrice,quotedBudget:momentum?route.orderUsd:undefined,riskScale:strategy?.regime?.scale,exitPlan });
         }
       }
       const previousApproval = new Map(approvedTicks.map(tick => [positionKey(tick), tick.signalAt]));
@@ -1054,7 +1101,9 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
             if (!order) continue;
             const previous=sellQuotes.get(key);
             if (previous?.expires >= Date.now()) {
-              if (previous.quantity===order.sol && previous.price) tick.exitQuote=previous;
+              if (previous.quantity===order.sol && previous.price && (order.reason!==5 ||
+                  previous.price*(1-policy.feeBps/10000)>position.cost/position.sol*1.002)) tick.exitQuote=previous;
+              else if (previous.price) tick.exitReason="Myyntitarjouksen nettotuotto alittaa voittoehdon";
               else tick.exitReason=previous.reason;
             } else if (!selling && Date.now()>=nextQuote) {
               const depth=tick.sellPool;
@@ -1063,7 +1112,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
               if (raw>0 && Number.isSafeInteger(raw)) {
                 selling++;
                 nextJupiter=Math.max(nextJupiter,Date.now()+1100);
-                void Promise.all([analyzeCounterfactualExit(tick.token,String(raw),{signal,apiKey:jupiterKey,requestQuote}),
+                void Promise.all([analyzeCounterfactualExit(tick.token,String(raw),{signal,apiKey:jupiterKey,requestQuote,economic:true}),
                   resolver.solPrice()]).then(([quote,reference])=>{
                   if (signal.aborted) return;
                   const quotePrice=Number(quote.lamports)*reference.price/1e9/(raw/10**decimals);
@@ -1231,9 +1280,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
 
   async function learn() {
     let virtualBusy = false;
+    let nextMark=0;
+    let nextFit=0;
     try {
       while (!signal.aborted) {
-        await pause(10000, signal);
+        await pause(3000, signal);
         if (signal.aborted) break;
         try {
           const now=Date.now();
@@ -1241,21 +1292,27 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           if (shadow) {
             virtualBusy=true;
             void Promise.all([analyzeCounterfactualExit(shadow.token,shadow.virtualEntry.tokenRaw,
-              {signal,apiKey:jupiterKey,requestQuote}), resolver.solPrice()]).then(([quote,sol])=>{
+              {signal,apiKey:jupiterKey,requestQuote,economic:true}), resolver.solPrice()]).then(([quote,sol])=>{
               if (signal.aborted) return;
               const recorded=learning.finishVirtual(shadow,quote,Date.now(),sol.price);
               diagnostic?.({token:shadow.token,stage:"virtual-learning",outcome:recorded?"approve":"reject",
-                reason:recorded?undefined:quote.reason??"Tarjouksen toteutusikkuna vanheni"});
+                reason:recorded?undefined:quote.reason??"Tarjouksen toteutusikkuna vanheni",evidence:{horizon:shadow.next}});
             }).catch(error=>{
               if (!signal.aborted) diagnostic?.({token:shadow.token,stage:"virtual-learning",outcome:"watch",reason:error.message});
             }).finally(()=>{virtualBusy=false;});
           }
-          const due = learning.due(now);
-          if (due.length) {
-            const quotes = Date.now() < dexRetryAt ? await tape.poolPrices(due) : await pricesWithFallback(due);
-            for (const tick of quotes) learning.mark(tick, tick.at);
+          if (now>=nextMark) {
+            nextMark=now+10000;
+            const due=learning.due(now);
+            if (due.length) {
+              const quotes=Date.now()<dexRetryAt?await tape.poolPrices(due):await pricesWithFallback(due);
+              for (const tick of quotes) learning.mark(tick,tick.at);
+            }
           }
-          calibration = learning.calibration(policy.momentumScore, Date.now());
+          if (now>=nextFit) {
+            nextFit=now+9000;
+            calibration=learning.calibration(policy.momentumScore,Date.now());
+          }
           if (learning.dirty && saveLearning) {
             const state = learning.snapshot();
             const generation = learning.generation;

@@ -21,38 +21,102 @@ export function momentumEntry(pair, sources, threshold, now) {
   const volumeHour = pair.volume?.h1;
   const metrics = tape({ volume5, volumeHour,
     change5: pair.priceChange?.m5, changeHour: pair.priceChange?.h1, transactions: pair.txns });
-  const result = (decision, code, reason, score = 0) => ({ decision, code, reason, score });
+  const match = pair.txns?.m5;
+  const count = Number.isSafeInteger(match?.buys) && Number.isSafeInteger(match?.sells) && match.buys >= 0 && match.sells >= 0
+    ? match.buys + match.sells : null;
+  const age = (now - pair.pairCreatedAt) / 60000;
+  const young = Number.isFinite(age) && age >= 5 && age < 60;
+  const depth = Number(pair.liquidity?.usd);
+  const prior = finite(volumeHour) && volumeHour >= volume5 ? volumeHour - volume5 : null;
+  const oldMinutes = young ? age - 5 : 55;
+  const acceleration = prior > 0 && oldMinutes >= 1 ? volume5 / 5 / (prior / oldMinutes) : null;
+  const strongYoungTape = young && volume5 >= Math.max(100,depth * .012) && count >= 8 && metrics.buying >= .62;
+  const requiredTrades = depth >= 50000 && metrics.buying >= .64 ? 4 : 5;
+  const requiredPressure = metrics.hour > 5 && acceleration >= 1.4 ? .55 : young ? .60 : .58;
+  const sustained = metrics.hour >= 0 && metrics.buying >= .64 && metrics.move >= 1 && volume5 >= depth*.01;
+  const gates = {
+    "missing-tape": ![metrics.move,volume5].every(finite),
+    "missing-flow": count === null,
+    "thin-flow": count !== null && count < requiredTrades,
+    "extended-5m": metrics.move > 20,
+    "hour-drop": metrics.hour < -25,
+    "hour-extension": metrics.hour > 75,
+    "missing-baseline": (!finite(metrics.hour) || !finite(acceleration)) && !strongYoungTape,
+    "no-rebound": finite(metrics.move) && metrics.move <= 0,
+    "buy-pressure": finite(metrics.buying) && metrics.buying < requiredPressure,
+    "low-acceleration": finite(acceleration) && acceleration < 1.2 && !sustained,
+    "weak-hour": metrics.hour < -3
+  };
+  const result = (decision, code, reason, score = 0) => ({ decision, code, reason, score, gates });
   if (quality.tier === "reject" || [volume5, volumeHour].some(v => finite(v) && v < 0) ||
       [metrics.move, metrics.hour].some(v => finite(v) && v < -100))
     return result("reject", "invalid", "Virheellinen markkinadata");
-  if (![metrics.move, volume5].every(finite))
+  if (gates["missing-tape"])
     return result("watch", "missing-tape", "5 min hinta tai volyymi puuttuu");
-  const flow = pair.txns?.m5;
-  if (!Number.isSafeInteger(flow?.buys) || !Number.isSafeInteger(flow?.sells))
+  if (gates["missing-flow"])
     return result("watch", "missing-flow", "5 min kauppamäärät puuttuvat");
-  if (flow.buys + flow.sells < 5)
-    return result("watch", "thin-flow", "Alle viisi kauppaa viimeisen 5 min aikana");
-  if (metrics.move > 20 || metrics.hour < -25 || metrics.hour > 75)
+  if (gates["thin-flow"])
+    return result("watch", "thin-flow", "Viiden minuutin toteumamäärä alle poolin vaatimuksen");
+  if (gates["extended-5m"] || gates["hour-drop"] || gates["hour-extension"])
     return result("reject", "extended", "Liian voimakas hintaliike tai laskeva tuntitrendi");
-  const age = (now - pair.pairCreatedAt) / 60000;
-  const young = Number.isFinite(age) && age >= 5 && age < 60;
-  const prior = finite(volumeHour) && volumeHour >= volume5 ? volumeHour - volume5 : null;
-  const baseline = prior && prior > 0 ? prior / (young ? age - 5 : 55) : null;
-  const acceleration = baseline > 0 ? volume5 / 5 / baseline : null;
-  const strongYoungTape = young && volume5 >= Math.max(1000, pair.liquidity.usd * .04) &&
-    flow.buys + flow.sells >= 12 && metrics.buying >= .65;
-  if ((!finite(metrics.hour) || !finite(acceleration)) && !strongYoungTape)
+  if (gates["missing-baseline"])
     return result("watch", "missing-baseline", "Volyymin vertailujakso tai tuntitrendi puuttuu");
   const score = Math.round(clamp(quality.score * .45 + metrics.buying * 25 +
     (finite(acceleration) ? Math.min(acceleration, 3) * 5 : 8) +
     (metrics.move > 0 ? 10 : 0) + (metrics.hour > 0 ? 5 : 0), 0, 100));
-  if (metrics.move <= 0) return result("watch", "no-rebound", "5 min hintasuunta ei ole positiivinen", score);
-  if (metrics.buying < .58) return result("watch", "buy-pressure", "Heikko 5 min ostopaine", score);
-  if (finite(acceleration) && acceleration < 1.2 || metrics.hour < -3)
+  gates.score = score < threshold;
+  if (gates["no-rebound"]) return result("watch", "no-rebound", "5 min hintasuunta ei ole positiivinen", score);
+  if (gates["buy-pressure"]) return result("watch", "buy-pressure", "Heikko 5 min ostopaine", score);
+  if (gates["low-acceleration"] || gates["weak-hour"])
     return result("watch", "weak-momentum", "Volyymin kiihtyminen tai tuntitrendi on heikko", score);
   if (score < threshold) return result("watch", "score", "Momentumin pisteraja ei täyty", score);
   return result("approve", "signal",
     `Markkinalaatu ${quality.score}/100 · ostopaine ${Math.round(metrics.buying * 100)} % · 5 min ${metrics.move.toFixed(1)} %`, score);
+}
+
+// Pool snapshots support a price trajectory. The provider's rolling trades
+// and volume remain window aggregates and are never treated as new fills.
+export function snapshotMomentum(history, market, quality, threshold, policy) {
+  const result=(decision,code,reason,score=0,extra={})=>({decision,code,reason,score,...extra});
+  const last=history.at(-1);
+  const first=history.find(row=>last.at-row.at<=60000 && row.at<last.at && row.provider===last.provider);
+  if (!first || last.at-first.at<8000 || history.filter(row=>row.at>=first.at && row.provider===last.provider).length<3)
+    return result("watch","quote-span","Tuoreita poolin hintahavaintoja tarvitaan lisää");
+  const flow=market.transactions?.m5, pressure=share(flow?.buys,flow?.sells);
+  const count=(flow?.buys??0)+(flow?.sells??0);
+  const depth=market.liquidity, volume=market.volume5;
+  const young=finite(market.created) && last.at-market.created<600000;
+  if (!(pressure >= (young?.62:.57) && count >= (young?5:8) &&
+        finite(volume) && volume >= Math.max(150,depth*(young?.008:.004))))
+    return result("watch","quote-flow","Poolihintojen tueksi ei ole riittävästi toteumia tai ostopainetta");
+  const move=(last.price/first.price-1)*100;
+  const middle=history.findLast(row=>row.at<last.at && row.at>first.at && row.provider===last.provider);
+  if (!(move>.35 && move<=10 && last.price>=middle?.price && depth>=first.liquidity*.9))
+    return result("watch","quote-motion","Poolihintojen liike tai likviditeetti ei vahvista signaalia");
+  if (market.change5>20 || market.changeHour< -25 || market.changeHour>75 || market.change5< -8)
+    return result("watch","quote-adverse","Pidemmän markkinaliikkeen riskiraja");
+  const score=Math.round(clamp(quality*.29+pressure*33+Math.min(move,4)*6+
+    Math.min(volume/depth*100,6)*2+(market.changeHour>=0?5:0)+6,0,100));
+  return result(score>=threshold?"approve":"watch",score>=threshold?"quote-signal":"score",
+    score>=threshold?"Poolihintojen nousu ja toteutunut ostovirta vahvistivat momentumin":"Poolisignaalin pisteraja ei täyty",
+    score,{observedMove:move,structural:true,window:{move,pressure},shortVolume:volume});
+}
+
+export function momentumBudget(cash, score, liquidity, scoreFloor, policy, scale = 1) {
+  const result=momentumSize(cash,score,liquidity,{...policy,momentumScore:scoreFloor,
+    orderUsd:Math.min(policy.orderUsd,cash*(policy.balanceFraction??10)/100)});
+  const size=Math.floor(result*Math.max(.55,Math.min(1,scale))*100)/100;
+  return size>=policy.momentumMinUsd?size:0;
+}
+
+export function momentumPayoff(market, observedMove, window, policy, learned) {
+  const move=finite(observedMove)?observedMove:window?.move??market.change5;
+  const strength=window?.pressure??share(market.transactions?.m5?.buys,market.transactions?.m5?.sells);
+  if (!(move>0) || !(strength>.5)) return 0;
+  // Haircut observed movement instead of projecting it linearly. Risk and
+  // cash controls remain outside this scenario estimate.
+  const estimate=clamp(move*(.48+.25*(strength-.5)),0,Math.min(6,policy.profit??8));
+  return learned ? Math.min(estimate,Math.max(0,learned.payoffPct)) : estimate;
 }
 
 export function momentumSize(cash, score, liquidity, policy) {
@@ -88,12 +152,16 @@ export function momentumExit(book, tick, policy) {
   if (policy.breakEven > 0 && peakMove >= policy.breakEven && move <= 0)
     return exit(2, "Break-even-suoja");
   if ((1 - tick.price / peak) * 100 >= distance) return exit(3, "Volatiliteettiin mukautettu trailing stop");
-  if (at >= (policy.momentumHoldMinutes ?? 5) * 60000) return exit(4, "Enimmäispitoaika");
+  const maxHold=(policy.momentumHoldMinutes??5)*60000;
+  const planned=book.exitPlan;
+  if (at >= Math.min(maxHold,(planned?.holdSeconds??Infinity)*1000)) return exit(4,"Enimmäispitoaika");
   const partial = policy.momentumProfitShare ?? 50;
   const costFloor = (policy.feeBps + policy.slippageBps) / 100;
-  if (move >= Math.max(policy.momentumProfit ?? 8, costFloor + 1) && !book.profitTaken)
+  const target=planned ? Math.max(costFloor+.8,planned.costPct+.45,
+    Math.min(policy.momentumProfit??8,planned.payoffPct*1.45)*(planned.profitScale??1)) : (policy.momentumProfit??8);
+  if (move >= Math.max(target,costFloor+1) && !book.profitTaken)
     return exit(5, "Ensimmäinen Momentum-voittotavoite", partial / 100);
-  if (book.profitTaken && move >= (policy.momentumFinalProfit ?? 15))
+  if (book.profitTaken && move >= (planned?Math.min(policy.momentumFinalProfit??15,target*1.65):policy.momentumFinalProfit??15))
     return exit(5, "Jäljellä olevan osuuden voitto kotiutettu");
   const liveFlow = tick.shortWindow;
   if (["early", "short"].includes(book.track) && at >= 45000 && liveFlow?.spanMs >= 3000 &&
@@ -158,9 +226,10 @@ export function earlyMomentum(windows, market, quality, threshold, policy, previ
   const activity = recent.volume / Math.max(ticket, market.liquidity * .004);
   if (recent.distinctBuyers === 1 && recent.count >= 5)
     return watch("short-concentration", "Lyhyen ikkunan ostoista vastaa yksi tunnistettu lompakko");
-  if (!(recent.move > estimatedCostPct) || recent.move > 12 || context.move < -.5 ||
-      recent.pressure < .60 || context.pressure < .54 || activity < 1)
-    return watch("short-flow", "Lyhyen ikkunan ostovirta tai kulujen jälkeinen liike ei riitä");
+  if (!(recent.move > estimatedCostPct) || recent.move > 12) return watch("short-move","Lyhyt hintaliike ei kata arvioituja kuluja tai ylittää 12 %");
+  if (context.move < -.5) return watch("short-context","Lyhyen hintaliikkeen vertailuikkuna laskee");
+  if (recent.pressure < .60 || context.pressure < .54) return watch("short-pressure","Lyhyen ikkunan ostovirta jää alle vaatimuksen");
+  if (activity < 1) return watch("short-volume","Lyhyen ikkunan volyymi jää alle poolin vaatimuksen");
   const older = Math.max(0, context.volume - recent.volume);
   const pace = older > 0 ? recent.volume / older : null;
   // Evidence in young markets is measured in fills and present liquidity.

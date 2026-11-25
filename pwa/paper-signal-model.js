@@ -4,6 +4,14 @@
 const features = ["buying", "pace", "move", "liquidity"];
 const bounded = value => Math.max(-.15, Math.min(.15, value));
 const mean = values => values.reduce((sum, value) => sum + value, 0) / values.length;
+export function chronologicalSplit(rows) {
+  const origin=row=>row.observedAt??row.at;
+  const ordered=[...rows].sort((a,b)=>origin(a)-origin(b));
+  const count=Math.floor(ordered.length*2/3);
+  const holdout=ordered.slice(count);
+  const cutoff=holdout.length?origin(holdout[0]):Infinity;
+  return [ordered.slice(0,count).filter(row=>row.at<=cutoff),holdout];
+}
 
 export function marketSegment(market, now) {
   const age = now - market.created;
@@ -31,7 +39,7 @@ export function fitSignalWeights(samples, now) {
   const groups = new Map();
   for (const row of samples) {
     if (!row.features || !row.segment || row.at > now || row.at < now - 86400000 ||
-        (row.type !== "paper" && !(row.executable && row.horizon === 120 && row.verified && row.calibratable))) continue;
+        (row.type !== "paper" && !(row.executable && [120,180].includes(row.horizon) && row.verified && row.calibratable))) continue;
     const cohort = `${row.type}/${row.track}/${row.segment}`;
     if (!groups.has(cohort)) groups.set(cohort, []);
     groups.get(cohort).push(row);
@@ -41,9 +49,7 @@ export function fitSignalWeights(samples, now) {
     const unique = [...new Map(rows.sort((a,b) => a.at-b.at).map(row => [row.key, row])).values()]
       .sort((a,b) => a.at-b.at);
     if (unique.length < 36) continue;
-    const split = Math.floor(unique.length * 2 / 3);
-    const train = unique.slice(0, split);
-    const holdout = unique.slice(split);
+    const [train,holdout]=chronologicalSplit(unique);
     const weights = {};
     for (const feature of features) {
       const effect = (subset, min) => {
@@ -60,6 +66,46 @@ export function fitSignalWeights(samples, now) {
     if (Object.keys(weights).length) trained[cohort] = { weights, train: train.length, holdout: holdout.length };
   }
   return trained;
+}
+
+export function fitExecutionRegimes(samples, now) {
+  const groups=new Map();
+  for (const row of samples) {
+    if (!row.segment || row.at>now || row.at<now-86400000 ||
+        (row.type!=="paper" && !(row.executable && row.verified && [60,120,180,300].includes(row.horizon)))) continue;
+    const key=`${row.track}/${row.segment}`;
+    const group=groups.get(key)??new Map();
+    const observation=group.get(row.key);
+    const observed=row.observedAt??row.at;
+    if (!observation || observed>observation.observed) group.set(row.key,{observed,at:row.at,labels:new Map([[row.horizon??0,row.net]])});
+    else if (observed===observation.observed) {
+      observation.labels.set(row.horizon??0,row.net);
+      observation.at=Math.max(row.at,observation.at);
+    }
+    groups.set(key,group);
+  }
+  const result={};
+  for (const [key,group] of groups) {
+    const rows=[...group.values()].map(row=>({...row,observedAt:row.observed}));
+    const outcomes=rows.map(row=>({...row,net:row.labels.get(0)??row.labels.get(180)??row.labels.get(120)}))
+      .filter(row=>Number.isFinite(row.net));
+    if (outcomes.length<36) continue;
+    const split=chronologicalSplit(outcomes);
+    if (split[0].length<18||split[1].length<12) continue;
+    const estimates=split.map(part=>mean(part.map(row=>bounded(row.net))));
+    if (estimates.some(value=>Math.abs(value)<.005) || Math.sign(estimates[0])!==Math.sign(estimates[1])) continue;
+    const positive=estimates[0]>0;
+    const early=rows.flatMap(row=>{
+      const a=row.labels.get(60), b=row.labels.get(180);
+      return Number.isFinite(a)&&Number.isFinite(b)?[{...row,net:bounded(a)-bounded(b)}]:[];
+    });
+    const earlyExit=early.length>=36 && chronologicalSplit(early)
+      .every(part=>part.length>=12 && mean(part.map(row=>row.net))>.01);
+    result[key]={ samples:outcomes.length, scale:positive?1:.65,
+      payoffPct:positive?Math.min(6,2+100*Math.min(...estimates)):.85,
+      holdSeconds:earlyExit?60:positive?180:90, profitScale:earlyExit||!positive?.75:1 };
+  }
+  return result;
 }
 
 export function learnedScore(model, track, segment, input, score) {
