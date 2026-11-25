@@ -19,7 +19,13 @@ test("Trojan quality scoring and Main/Sniper reversal thresholds", () => {
   assert.equal(trojanDecision(young, provenance, "main", now).decision, "watch");
   assert.equal(trojanDecision(young, provenance, "sniper", now).decision, "approve");
   assert.equal(trojanDecision({ ...pair, priceChange: {} }, provenance, "main", now).decision, "watch");
-  assert.equal(trojanDecision({ ...pair, priceChange: { ...pair.priceChange, m5: 9 } }, provenance, "main", now).decision, "reject");
+  const rising = { ...pair, priceChange: { ...pair.priceChange, m5: 9 } };
+  const decision = trojanDecision(rising, provenance, "main", now);
+  assert.equal(decision.decision, "approve");
+  assert.ok(decision.score < trojanDecision(pair, provenance, "main", now).score);
+  assert.notEqual(trojanDecision({ ...rising, txns: { m5: { buys: 1, sells: 9 } } }, provenance, "main", now).decision, "approve");
+  assert.notEqual(trojanDecision({ ...rising, liquidity: { usd: 100 } }, provenance, "main", now).decision, "approve");
+  assert.notEqual(trojanDecision({ ...rising, priceChange: { ...rising.priceChange, m5: 200000 } }, provenance, "main", now).decision, "approve");
 });
 
 test("discovery merges sources and retries incomplete metadata outside the pool allowance", () => {

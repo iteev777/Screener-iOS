@@ -146,7 +146,7 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
       const profileAllowed = !trojan || (orderUsd >= 1 &&
         Boolean(position || (positions.length < (policy.maxTotalPositions ?? 15) && profileCount < (selectedStrategy === 6 ? policy.maxSniperPositions ?? 10 : policy.maxMainPositions ?? 10))));
       const afterPreviousTrade = !previousTrade || (tick.observedAt ?? tick.at) > previousTrade.at;
-      const buyAllowed = afterPreviousTrade && orderUsd > 0 && profileAllowed && eligible(tick.token) && Number.isFinite(tick.volume) && tick.volume >= (trojan && !momentum ? policy[(selectedStrategy===6?"sniper":"main")+"MinVolume24"]??10000 : policy.scanMinVolume ?? 10000) && !duplicate &&
+      const buyAllowed = afterPreviousTrade && orderUsd > 0 && profileAllowed && eligible(tick.token) && Number.isFinite(tick.volume) && tick.volume >= 0 && !duplicate &&
         (position || Object.keys(portfolio.positions).length < (policy.maxPools ?? scanLimit)) &&
         exposure + (order?.usd ?? orderUsd) <= policy.exposureUsd;
       if (order && (exits || (!tick.exitsOnly && buyAllowed &&
