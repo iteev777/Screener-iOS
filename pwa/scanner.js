@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 import { address, aggregateCandles, discoverMarkets, fetchCandles, fetchTrojanCandles, normalizePair, timeframes } from "./markets.js";
 import { currentMarket, fetchJson, rpcCall } from "./network.js";
-import { applyPaperFill, orderFor, strategySettings } from "./policy.js";
+import { applyPaperFill, orderFor, reasons, strategySettings } from "./policy.js";
 import { ruleSignal } from "./rules.js";
 import { copyGroup } from "./copy.js";
-import { candidateQuality, trojanDecision } from "./trojan-analysis.js";
+import { analystWorker } from "./candidate-analyst.js";
+import { momentumExit, momentumSize } from "./momentum.js";
 import { fullRugCheck } from "./trojan-security.js";
 import { analyzeEntryRoute } from "./trojan-entry.js";
 import { verifyPools, verifyPoolReserves, estimateBinSwap, estimateTickSwap } from "./trojan-pools.js";
@@ -18,8 +19,8 @@ const classicTokenProgram = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const day = at => Math.floor(at / 86400000);
 export const positionKey = market => `${market.token}:${market.pool}`;
 
-export function newPortfolio() {
-  return { cash: 1000, realized: 0, positions: {}, trades: [], lossToday: 0 };
+export function newPortfolio(capital = 1000) {
+  return { cash: capital, initialCash: capital, realized: 0, positions: {}, trades: [], lossToday: 0 };
 }
 
 export function universe(portfolio, candidates, limit = scanLimit) {
@@ -82,6 +83,21 @@ export function rugEligible(report, ceiling) {
     !report.risks.some(risk => typeof risk?.level !== "string" || risk.level.toLowerCase() === "danger");
 }
 
+export function marketSnapshot(tick) {
+  if (!tick) return undefined;
+  const { price, liquidity, volume, volume5, volumeHour, transactions, change5, changeHour, marketCap, created, pool, name, symbol } = tick;
+  return { price, liquidity, volume, volume5, volumeHour, transactions, change5, changeHour, marketCap, created, pool, name, symbol };
+}
+
+function recordDecision(portfolio, tick, state, reason) {
+  portfolio.decisions ??= [];
+  const last = portfolio.decisions.find(row => row.mint === tick.token);
+  if (last?.state === state && last.reason === reason && tick.at - last.at < 60000) return;
+  portfolio.decisions.unshift({ at: tick.at, mint: tick.token, status: state, state, reason,
+    score: tick.score, market: marketSnapshot(tick) });
+  portfolio.decisions.length = Math.min(200, portfolio.decisions.length);
+}
+
 export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligible) {
   const unique = new Map(ticks.map(tick => [positionKey(tick), tick]));
   const input = [...unique.entries()].filter(([, tick]) =>
@@ -102,14 +118,21 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
         portfolio.lossDay = currentDay;
         portfolio.lossToday = 0;
       }
-      const book = { sol: 0, cost: 0, ...position, cash: portfolio.cash, realized: portfolio.realized,
+      const previousTrade = position ? undefined : portfolio.trades.find(trade => trade.token === tick.token);
+      const book = { sol: 0, cost: 0, lastTradeAt: previousTrade?.at, ...position, cash: portfolio.cash, realized: portfolio.realized,
         lossToday: portfolio.lossToday, lossDay: portfolio.lossDay, buyDay: portfolio.buyDay, buysToday: portfolio.buysToday, trades: [], count: 0 };
-      const trojan = policy.strategy >= 5;
       const selectedStrategy = position?.strategy ?? tick.tradeStrategy ?? policy.strategy;
+      const trojan = selectedStrategy >= 5;
+      const momentum = selectedStrategy === 8;
       const profilePolicy = strategySettings(policy, selectedStrategy);
-      const orderUsd = trojan ? Math.round(Math.min(profilePolicy.orderUsd, book.cash * (policy.balanceFraction ?? 10) / 100) * 100) / 100 : policy.orderUsd;
-      const executionPolicy = trojan ? { ...profilePolicy, orderUsd, lossUsd: policy.lossUsd } : policy;
-      const order = orderFor(engine, decide(tick, book), book, tick, executionPolicy);
+      const orderUsd = momentum ? momentumSize(book.cash, tick.score, tick.liquidity, {
+        ...policy, orderUsd: Math.min(policy.orderUsd, book.cash * (policy.balanceFraction ?? 10) / 100)
+      }) : trojan ? Math.round(Math.min(profilePolicy.orderUsd, book.cash * (policy.balanceFraction ?? 10) / 100) * 100) / 100 : policy.orderUsd;
+      const executionPolicy = trojan ? { ...profilePolicy, strategy: selectedStrategy, orderUsd, lossUsd: policy.lossUsd } : policy;
+      const signal = tick.manual ? 0 : decide(tick, book);
+      const order = position && tick.manual ? { side: "Myynti", sol: book.sol, reason: 10, detail: "Käyttäjä sulki paperiposition" }
+        : position && momentum ? momentumExit(book, tick, executionPolicy)
+        : orderFor(engine, signal, book, tick, executionPolicy);
       if (exits && order?.side !== "Myynti") continue;
       if (!exits && order?.side === "Myynti") continue;
       const exposure = Object.values(portfolio.positions).reduce((sum, item) => sum + item.cost, 0);
@@ -119,28 +142,57 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
       const profileCount = trojan ? positions.filter(item => item.strategy === selectedStrategy).length : 0;
       const profileAllowed = !trojan || (orderUsd >= 1 &&
         Boolean(position || (positions.length < (policy.maxTotalPositions ?? 15) && profileCount < (selectedStrategy === 6 ? policy.maxSniperPositions ?? 10 : policy.maxMainPositions ?? 10))));
-      const buyAllowed = profileAllowed && eligible(tick.token) && Number.isFinite(tick.volume) && tick.volume >= (trojan ? policy[(selectedStrategy===6?"sniper":"main")+"MinVolume24"]??10000 : policy.scanMinVolume ?? 10000) && !duplicate &&
+      const afterPreviousTrade = !previousTrade || (tick.observedAt ?? tick.at) > previousTrade.at;
+      const buyAllowed = afterPreviousTrade && orderUsd > 0 && profileAllowed && eligible(tick.token) && Number.isFinite(tick.volume) && tick.volume >= (trojan && !momentum ? policy[(selectedStrategy===6?"sniper":"main")+"MinVolume24"]??10000 : policy.scanMinVolume ?? 10000) && !duplicate &&
         (position || Object.keys(portfolio.positions).length < (policy.maxPools ?? scanLimit)) &&
         exposure + (order?.usd ?? orderUsd) <= policy.exposureUsd;
       if (order && (exits || (!tick.exitsOnly && buyAllowed &&
           (tick.routeExpires === undefined || Date.now() <= tick.routeExpires)))) {
+        order.detail ??= order.side === "Osto" ? tick.analysisReason ?? "Strategian ostosignaali" : undefined;
         applyPaperFill(book, order, tick, executionPolicy);
         portfolio.cash = book.cash;
         portfolio.realized = book.realized;
         portfolio.lossToday = book.lossToday;
         portfolio.buyDay = book.buyDay;
         portfolio.buysToday = book.buysToday;
-        portfolio.trades.unshift({ ...book.trades[0], strategy: selectedStrategy, symbol: tick.symbol, token: tick.token, pool: tick.pool });
+        portfolio.totalTrades = (portfolio.totalTrades ?? portfolio.trades.length) + 1;
+        const entry = position ? position.cost / position.sol : book.cost / book.sol;
+        portfolio.trades.unshift({ ...book.trades[0], strategy: selectedStrategy, symbol: tick.symbol, token: tick.token, pool: tick.pool,
+          score: tick.score ?? position?.score, entryReason: position?.entryReason ?? tick.analysisReason,
+          verification: tick.verification, market: marketSnapshot(tick), entryPrice: entry,
+          peakReturn: Math.max(position?.peak ?? tick.price, tick.price) / entry - 1,
+          worstReturn: Math.min(position?.worst ?? tick.price, tick.price) / entry - 1 });
+        recordDecision(portfolio, tick, order.side === "Osto" ? "BUY" : book.sol > 0 ? "PARTIAL SELL" : "EXIT",
+          order.detail ?? reasons[order.reason]);
         portfolio.trades.length = Math.min(portfolio.trades.length, 200);
-      }
+      } else if (!exits && signal === 1 && !position) {
+        const reason = !afterPreviousTrade ? "Hinta saatiin ennen edellistä kauppaa"
+          : day(tick.at) === book.lossDay && book.lossToday >= policy.lossUsd ? "Päivän tappioraja"
+          : day(tick.at) === book.buyDay && book.buysToday >= policy.maxDailyBuys ? "Päivän ostoraja"
+          : previousTrade && tick.at < previousTrade.at + policy.cooldownSeconds * 1000 ? "Saman tokenin kauppajäähy"
+          : "Riski-, kelpoisuus- tai voimassaoloraja esti oston";
+        recordDecision(portfolio, tick, "REJECT", reason);
+      } else if (position) recordDecision(portfolio, tick, "HOLD", "Poistumisehdot eivät täyty");
       if (book.sol > 0) {
         const { sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool, lastTradeAt } = book;
         portfolio.positions[key] = { strategy: selectedStrategy, sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool,
-          lastTradeAt, peak: Math.max(book.peak ?? tick.price, tick.price), mark: tick.price,
+          name: tick.name ?? position?.name, score: tick.score ?? position?.score,
+          entryReason: position?.entryReason ?? tick.analysisReason,
+          worst: Math.min(position?.worst ?? tick.price, tick.price),
+          liquidity: tick.liquidity, change5: tick.change5, lastTradeAt, peak: Math.max(book.peak ?? tick.price, tick.price), mark: tick.price,
           lastTickAt: tick.at, market: { token: tick.token, pool: tick.pool, symbol: tick.symbol, quoteToken: tick.quoteToken ?? position?.market?.quoteToken } };
       } else if (position) {
         delete portfolio.positions[key];
       }
+    }
+  }
+  if (input.length) {
+    const at = portfolio.lastScanAt;
+    const equity = portfolio.cash + Object.values(portfolio.positions).reduce((sum, position) => sum + position.sol * position.mark, 0);
+    portfolio.history ??= [];
+    if (at - (portfolio.history.at(-1)?.at ?? 0) >= 60000 || portfolio.trades[0]?.at === at) {
+      portfolio.history.push({ at, equity });
+      if (portfolio.history.length > 1440) portfolio.history.shift();
     }
   }
   return portfolio;
@@ -194,6 +246,8 @@ export function technicalEntry(engine, candles) {
 export async function runScanner({ engine, policy, rules, timeframe, copyWallets, birdeyeKey,
     signal, load, commit, report, telemetry, event, jupiterKey, simulationWallet }) {
   const queue = new CandidateQueue();
+  const analyzeInWorker = analystWorker(signal);
+  const scanProfile = policy.strategy === 6 ? "sniper" : undefined;
   const sources = sourcesFor(birdeyeKey).map(source => ({ ...source, due: 0, failures: 0 }));
   const histories = new Map();
   const mintCache = new Map();
@@ -201,18 +255,38 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   const routeCache = new Map();
   let solQuote;
   let nextJupiter = 0;
-  const publish = (mint, status, reason, score, quality) => {
-    if (!signal.aborted) event?.({ at: Date.now(), mint, status, reason, score, quality });
+  let nextQuote = 0;
+  async function requestQuote(work) {
+    while (!signal.aborted && Date.now() < nextQuote) await pause(nextQuote - Date.now(), signal);
+    signal.throwIfAborted();
+    nextQuote = Date.now() + 1100;
+    try { return await work(); }
+    catch (error) {
+      if (error.status === 429) nextQuote = Math.max(nextQuote, Date.now() + Math.max(60000, error.retryAfterMs ?? 0));
+      throw error;
+    }
+  }
+  const publish = (mint, status, reason, score, quality, market) => {
+    if (signal.aborted) return;
+    const at = Date.now();
+    if (status === "found") recent.found.push(at);
+    if (status === "approve") recent.signals.push(at);
+    if (status === "watch" || status === "reject") {
+      reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
+      if (reasons.size > 100) reasons.delete(reasons.keys().next().value);
+    }
+    event?.({ at, mint, status, reason, score, quality, market });
   };
   const add = (tokens, source) => {
     const discovered = queue.add(tokens, source, Date.now());
-    for (const token of discovered) publish(token, "found", source);
+    for (const token of discovered) publish(token, "found", source, undefined, undefined, marketSnapshot(queue.sniperItems.get(token) ?? queue.items.get(token)));
   };
   let cursors = new Map();
   let pump = "yhdistetään";
   let sourceError = "";
   let processing = 0;
   const routePending=new Set();
+  const marketRanks = new WeakMap();
   let routeActive=0, routeLimit=2;
   const sellPoolCache=new Map(), sellPoolPending=new Set();
   const poolCache=new Map(), poolPending=new Set(), rugPending=new Set(), mintPending=new Set();
@@ -226,14 +300,37 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   let rugActive = 0;
   let rugCooldown = 0;
   let analysisMs = 0;
-  let analysisBatches = 0;
+  let analysisTotal = 0;
+  let discoveryMs = 0;
+  let discoverySamples = 0;
+  let lastTelemetry = 0;
+  let tradeCount = 0;
+  let lastFillAt = 0;
+  let lastFill = "";
+  let peakWorkers = 0;
+  const recent = { found: [], analyzed: [], signals: [] };
+  const reasons = new Map();
   let candleIndex = 0;
   const candles = new Map();
   let approvedTicks = [];
   let copySignals = new Map();
   let copyAt = 0;
   const usedPrices = new Map();
-  const show = () => { if (!signal.aborted) telemetry?.({ ...queue.snapshot(Date.now()), processing, activeWorkers, workerLimit, adaptiveLimit, averageAnalysisMs: analysisBatches ? Math.round(analysisMs / analysisBatches) : 0, pump, sourceError, sources: sources.map(s => ({name:s.name,count:s.count ?? 0,busy:!!s.busy,error:s.error ?? ""})) }); };
+  const show = () => {
+    const at = Date.now();
+    if (signal.aborted || at - lastTelemetry < 1000) return;
+    lastTelemetry = at;
+    for (const key of Object.keys(recent)) recent[key] = recent[key].filter(time => time > at - 60000);
+    telemetry?.({ ...queue.snapshot(at, scanProfile), processing, activeWorkers, peakWorkers, workerLimit, adaptiveLimit,
+      foundPerMinute: recent.found.length, analyzedPerMinute: recent.analyzed.length, signalsPerMinute: recent.signals.length,
+      analysisTotal, averageAnalysisMs: Math.round(analysisMs / (analysisTotal || 1)),
+      averageDiscoveryMs: Math.round(discoveryMs / (discoverySamples || 1)), tradeCount, lastFill,
+      pump, sourceError, reasons: [...reasons].sort((a, b) => b[1] - a[1]).slice(0, 8),
+      sources: sources.map(source => ({ name: source.name, count: source.count, busy: Boolean(source.busy), error: source.error })),
+      apis: { "DEX": at < marketCooldown ? "Tauolla" : "Valmis", "RugCheck": at < rugCooldown ? "Tauolla" : rugActive ? "Haetaan" : "Valmis",
+        "Solana RPC": mintPending.size || poolPending.size ? "Tarkistetaan" : "Valmis", "Jupiter": routeActive ? "Haetaan" : "Valmis" }
+    });
+  };
   watchPumpPortal(signal, mint => add([mint], "PumpPortal"), status => {
     pump = status;
     show();
@@ -249,7 +346,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         void (async () => {
         try {
           const tokens = await source.load(signal);
-          if (!signal.aborted) add(tokens, source.name);
+          if (!signal.aborted) {
+            // Large general catalogs are fallbacks, behind the transactional discovery feeds.
+            const admitted = source.interval >= 3600000 ? tokens.slice(0, 60) : tokens;
+            add(admitted, source.name);
+          }
           source.failures = 0;
           source.count = tokens.length;
           source.error = "";
@@ -258,8 +359,10 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           sourceError = `${source.name}: ${error.message}`;
           source.failures++;
           source.error = error.message;
+          source.retryAt = Date.now() + (error.retryAfterMs ?? 0);
         } finally {
           source.due = Date.now() + Math.min(Math.max(300000, source.interval), source.interval * 2 ** Math.min(source.failures, 4));
+          source.due = Math.max(source.due, source.retryAt ?? 0);
           if (!source.failures) source.due = Date.now() + source.interval;
           source.busy = false;
           show();
@@ -271,177 +374,205 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
     }
   }
 
-  async function analyze(workerId) {
-    let failures = 0;
-    while (!signal.aborted) {
-      const started = Date.now();
-      if (started - lastScale >= 5000 && started >= marketCooldown) {
-        lastScale = started;
-        const demand = Math.max(1, Math.ceil(queue.snapshot(started).queued / 30) + activeWorkers);
-        adaptiveLimit = Math.min(workerLimit, demand, adaptiveLimit + 1);
+  const wake = (item, delay = 500) => {
+    if (!item.inFlight && !signal.aborted) item.due = Math.min(item.due, Date.now() + delay);
+  };
+
+  async function analyzeBatch(batch, started) {
+    try {
+      const markets = await marketBatch(batch.map(item => item.token), signal);
+      if (signal.aborted) return;
+      const now = Date.now();
+      const inputs = batch.map(item => ({
+        token: item.token, raw: markets.get(item.token)?.raw, sources: [...item.sources]
+      }));
+      const missing = [];
+      const scores = new Map();
+      for (const input of inputs) {
+        const saved = input.raw && marketRanks.get(input.raw);
+        if (saved?.sources === input.sources.join() && now - saved.at < 4000) scores.set(input.token, saved.rank);
+        else missing.push(input);
       }
-      if (workerId >= adaptiveLimit || started < marketCooldown || started < nextMarketRequest) {
-        await pause(250, signal);
-        continue;
+      const rankedNew = missing.length ? await analyzeInWorker(missing, policy, now) : [];
+      for (const [index, rank] of rankedNew.entries()) {
+        const { raw, sources } = missing[index];
+        scores.set(rank.token, rank);
+        if (raw) marketRanks.set(raw, { at: now, sources: sources.join(), rank });
       }
-      const batch = queue.take(started);
-      if (!batch.length) {
-        show();
-        await pause(500, signal);
-        continue;
+      const ranked = batch.filter(item => scores.has(item.token)).map(item => ({
+        ...scores.get(item.token), item, pair: markets.get(item.token)
+      })).sort((a, b) => (b.quality?.score ?? 0) - (a.quality?.score ?? 0));
+      if (signal.aborted) return;
+      for (const cache of [mintCache, rugCache, routeCache]) {
+        for (const [token, value] of cache) if (value.expires <= now) cache.delete(token);
       }
-      nextMarketRequest = started + 350;
-      processing += batch.length;
-      activeWorkers++;
-      show();
-      try {
-        const markets = await marketBatch(batch.map(item => item.token), signal);
+      const possible = ranked.filter(row => row.decision === "approve").sort((a,b)=>((b.strategy?.score??0)+(b.profile==="sniper"?12:0))-((a.strategy?.score??0)+(a.profile==="sniper"?12:0)));
+      for(const [key,value] of poolCache)if(value.expires<=Date.now())poolCache.delete(key);
+      const poolJobs=policy.strategy>=5?possible.filter(({pair})=>!poolCache.has(positionKey(pair.market))&&!poolPending.has(positionKey(pair.market))).slice(0,Math.max(0,2-poolActive)):[];
+      void Promise.all(poolJobs.map(async ({pair, item})=>{
+        const market=pair.market,key=positionKey(market);poolPending.add(key);poolActive++;
+        try{let [pool]=await verifyPools([market],signal);if(pool.status==="approve")pool={...pool,...await verifyPoolReserves(market,signal)};poolCache.set(key,{...pool,expires:Date.now()+8000});}
+        catch(error){poolCache.set(key,{status:"watch",reason:error.message,expires:Date.now()+5000});}
+        finally{poolPending.delete(key);poolActive--; if (poolCache.get(key)?.status === "approve") wake(item);}
+      }));
+      const needMint = possible.filter(row => !mintCache.has(row.item.token)&&!mintPending.has(row.item.token)).map(row => row.item.token);
+      for(const token of needMint)mintPending.add(token);
+      void (async()=>{try {
+        if(!needMint.length)return;
+        const checked = await scanMints(needMint, signal);
         if (signal.aborted) return;
-        const now = Date.now();
-        const ranked = batch.map(item => {
-          const pair = markets.get(item.token);
-          const quality = pair && candidateQuality(pair.raw, item.sources, now);
-          let profile = policy.strategy === 6 ? "sniper" : "main";
-          let strategy = policy.strategy >= 5 && pair ? trojanDecision(pair.raw, item.sources, profile, now, policy) : null;
-          if (policy.strategy === 7 && pair && item.sources.has("PumpPortal")) {
-            const sniper = trojanDecision(pair.raw, item.sources, "sniper", now, policy);
-            if (sniper.decision === "approve" || (strategy.decision !== "approve" && sniper.score > strategy.score)) { profile = "sniper"; strategy = sniper; }
-          }
-          const decision = !pair || (profile === "sniper" && !item.sources.has("PumpPortal")) ? "watch"
-            : quality.tier === "reject" ? "reject" : strategy?.decision ?? "approve";
-          return { item, pair, quality, decision, strategy, profile };
-        }).sort((a, b) => (b.quality?.score ?? 0) - (a.quality?.score ?? 0));
-        for (const cache of [mintCache, rugCache, routeCache]) {
-          for (const [token, value] of cache) if (value.expires <= now) cache.delete(token);
-        }
-        const possible = ranked.filter(row => row.decision === "approve").sort((a,b)=>((b.strategy?.score??0)+(b.profile==="sniper"?12:0))-((a.strategy?.score??0)+(a.profile==="sniper"?12:0)));
-        for(const [key,value] of poolCache)if(value.expires<=Date.now())poolCache.delete(key);
-        const poolJobs=policy.strategy>=5?possible.filter(({pair})=>!poolCache.has(positionKey(pair.market))&&!poolPending.has(positionKey(pair.market))).slice(0,Math.max(0,2-poolActive)):[];
-        const poolWork=Promise.all(poolJobs.map(async ({pair})=>{
-          const market=pair.market,key=positionKey(market);poolPending.add(key);poolActive++;
-          try{let [pool]=await verifyPools([market],signal);if(pool.status==="approve")pool={...pool,...await verifyPoolReserves(market,signal)};poolCache.set(key,{...pool,expires:Date.now()+8000});}
-          catch(error){poolCache.set(key,{status:"watch",reason:error.message,expires:Date.now()+5000});}
-          finally{poolPending.delete(key);poolActive--;}
-        }));
-        const needMint = possible.filter(row => !mintCache.has(row.item.token)&&!mintPending.has(row.item.token)).map(row => row.item.token);
-        for(const token of needMint)mintPending.add(token);
-        const mintWork=(async()=>{try {
-          if(!needMint.length)return;
-          const checked = await scanMints(needMint, signal);
-          if (signal.aborted) return;
-          for (const token of needMint) mintCache.set(token, { ok: checked.get(token) === true, expires: now + 300000 });
-        } catch (error) {
-          sourceError = `Minttitarkistus: ${error.message}`;
-        }finally{for(const token of needMint)mintPending.delete(token);}})();
-        const rugCeiling = policy.rugScore || (policy.strategy >= 5 ? 30 : 0);
-        if (rugCeiling > 0 && !signal.aborted && Date.now() >= rugCooldown) {
-          const needRug = possible.filter(({ item }) => !rugCache.has(item.token) && !rugPending.has(item.token)).slice(0, Math.max(0, Math.min(2, 4 - rugActive)));
-          rugActive += needRug.length;
-          await Promise.all(needRug.map(async ({ item }) => {
-            rugPending.add(item.token);
-            try {
-              const suffix = policy.strategy >= 5 ? "report" : "report/summary";
-              const raw = await fetchJson(`https://api.rugcheck.xyz/v1/tokens/${item.token}/${suffix}`, {}, signal);
-              const check = policy.strategy >= 5 ? fullRugCheck(raw, { scoreLimit: rugCeiling }) : null;
-              rugCache.set(item.token, { ok: check ? check.status === "approve" ? true :
-                check.status === "watch" ? null : false : rugEligible(raw, rugCeiling),
-                reason: check?.reasons.join("; ").slice(0, 200), expires: now + (check?.status === "watch" ? 30000 : 300000) });
-            } catch (error) {
-              rugCache.set(item.token, { ok: null, expires: now + 30000 });
-              sourceError = `RugCheck: ${error.message}`;
-              if (error.status === 429) rugCooldown = Date.now() + 60000;
-            } finally { rugActive--; rugPending.delete(item.token); }
-          }));
-        }
-        await Promise.all([mintWork,poolWork]);
-        if (signal.aborted) return;
-        if (policy.strategy >= 5 && routeActive < routeLimit && Date.now() >= nextJupiter) {
-          const next = possible.find(({ item, pair }) => mintCache.get(item.token)?.ok &&
-            rugCache.get(item.token)?.ok && poolCache.get(positionKey(pair.market))?.expires>Date.now() && !routeCache.has(positionKey(pair.market)) && !routePending.has(positionKey(pair.market)));
-          if (next) {
-            const market = next.pair.market;
-            const routeKey=positionKey(market);
-            routePending.add(routeKey);routeActive++;
-            nextJupiter=Date.now()+2050;
-            try {
-              const pool = poolCache.get(positionKey(market));
-              if(!pool || pool.expires<=Date.now())throw new Error("Poolitarkistus vanhentui");
-              if (pool.status !== "approve") {
-                routeCache.set(positionKey(market), { ...pool, expires: Date.now() + 30000 });
-              } else {
-                if (!solQuote || Date.now() - solQuote.at > 15000) solQuote = await currentMarket(signal);
-                const orderUsd = strategySettings(policy, next.profile === 'sniper' ? 6 : 5).orderUsd;
-                const depth = assessEntryDepth(pool,market,orderUsd,solQuote.price,policy[next.profile+"MaxImpact"]??5);
-                if(depth.status==="reject"||depth.status==="watch"){
-                  routeCache.set(positionKey(market),{...depth,expires:Date.now()+15000});
-                } else {
-                const route = await analyzeEntryRoute(market.token, orderUsd, {
-                  signal, solUsd: solQuote.price, apiKey: jupiterKey, taker: simulationWallet || undefined,
-                  slippageBps: 100
-                });
-                routeCache.set(positionKey(market), { status: route.allowed ? "approve" : "reject",
-                  entryImpactPct: route.impact,
-                  reason: `${pool.protocol} · ${depth.reason} · ${route.reason} (${route.score}/100)${route.simulation ? ` · simulaatio ${route.simulation}` : ""}`,
-                  expires: Date.now() + (route.allowed ? 8000 : 30000) });
-                }
-              }
-            } catch (error) {
-              if(error.status===429 || /429|rate limit/i.test(error.message)){routeLimit=1;nextJupiter=Math.max(nextJupiter,Date.now()+60000);}
-              routeCache.set(positionKey(market), { status: "watch", reason: error.message, expires: Date.now() + 15000 });
-            } finally {
-              routePending.delete(routeKey);routeActive--;
-            }
-          }
-        }
-        if (signal.aborted) return;
-        const candidates = [];
-        for (const { item, pair, decision, quality, strategy, profile } of ranked) {
-          const authority = mintCache.get(item.token)?.ok;
-          const report = rugCache.get(item.token);
-          const rug = rugCeiling > 0 ? report?.ok : true;
-          const route = pair && policy.strategy >= 5 ? routeCache.get(positionKey(pair.market)) : null;
-          let checked = decision;
-          let reason = strategy?.reason ?? (pair ? "Markkinadata tarkistettu" : "Poolin hintadata puuttuu");
-          if (decision === "approve") {
-            if (authority === false) { checked = "reject"; reason = "Mintin omistaja tai minttaus-/jäädytysvaltuus"; }
-            else if (rug === false) { checked = "reject"; reason = report.reason || "RugCheck hylkäsi"; }
-            else if (authority !== true || rug !== true) { checked = "watch"; reason = report?.reason || "Odotetaan turvallisuustarkistusta"; }
-            else if (policy.strategy >= 5) {
-              checked = route?.status === "unsupported" ? "watch" : route?.status ?? "watch";
-              reason = route?.reason ?? "Odotetaan pooli- ja Jupiter-analyysiä";
-            }
-          } else if (quality?.tier === "reject") reason = "Virheellinen markkinadata";
-          if (item.decision !== checked || item.reason !== reason) {
-            publish(item.token, checked, reason, strategy?.score, quality?.score);
-          }
-          item.reason = reason;
-          queue.finish(item, checked, pair?.raw, now);
-          if (checked === "approve") {
-            if (route) item.due = Math.min(item.due, route.expires);
-            candidates.push({ ...pair.market, tradeStrategy: policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: now, priority: item.priority, routeExpires: route?.expires, entryImpactPct: route?.entryImpactPct });
-          }
-        }
-        approvedTicks = [...candidates, ...approvedTicks.filter(tick => !batch.some(item => item.token === tick.token))]
-          .filter(tick => now - tick.at <= maxTickAge)
-          .sort((a, b) => b.priority - a.priority).slice(0, 120);
-        failures = 0;
+        for (const token of needMint) mintCache.set(token, { ok: checked.get(token) === true, expires: Date.now() + 300000 });
+        for (const { item } of possible) if (needMint.includes(item.token)) wake(item);
       } catch (error) {
-        if (!signal.aborted) {
-          sourceError = `Analyysihaku: ${error.message}`;
-          adaptiveLimit = Math.max(1, Math.floor(adaptiveLimit / 2));
-          marketCooldown = Date.now() + (error.status === 429 ? 60000 : 3000);
-        }
-        failures++;
-      } finally {
-        queue.release(batch, Date.now());
-        processing -= batch.length;
-        activeWorkers--;
-        analysisMs += Date.now() - started;
-        analysisBatches++;
-        show();
+        sourceError = `Minttitarkistus: ${error.message}`;
+      }finally{for(const token of needMint)mintPending.delete(token);}})();
+      const rugCeiling = policy.rugScore || (policy.strategy >= 5 ? 30 : 0);
+      if (rugCeiling > 0 && !signal.aborted && Date.now() >= rugCooldown) {
+        const needRug = possible.filter(({ item }) => !rugCache.has(item.token) && !rugPending.has(item.token)).slice(0, Math.max(0, Math.min(2, 4 - rugActive)));
+        rugActive += needRug.length;
+        void Promise.all(needRug.map(async ({ item }) => {
+          rugPending.add(item.token);
+          try {
+            const suffix = policy.strategy >= 5 ? "report" : "report/summary";
+            const raw = await fetchJson(`https://api.rugcheck.xyz/v1/tokens/${item.token}/${suffix}`, {}, signal);
+            const check = policy.strategy >= 5 ? fullRugCheck(raw, { scoreLimit: rugCeiling }) : null;
+            rugCache.set(item.token, { ok: check ? check.status === "approve" ? true :
+              check.status === "watch" ? null : false : rugEligible(raw, rugCeiling),
+              reason: check?.reasons.join("; ").slice(0, 200), expires: Date.now() + (check?.status === "watch" ? 30000 : 300000) });
+            if (check?.status !== "watch") wake(item);
+          } catch (error) {
+            rugCache.set(item.token, { ok: null, expires: now + 30000 });
+            sourceError = `RugCheck: ${error.message}`;
+            if (error.status === 429) rugCooldown = Date.now() + Math.max(60000, error.retryAfterMs ?? 0);
+          } finally { rugActive--; rugPending.delete(item.token); }
+        }));
       }
-      await pause(failures ? Math.min(60000, 3000 * 2 ** Math.min(failures, 5)) : 500, signal);
+      if (signal.aborted) return;
+      if (policy.strategy >= 5 && routeActive < routeLimit && Date.now() >= nextJupiter) {
+        const next = possible.find(({ item, pair }) => mintCache.get(item.token)?.ok &&
+          rugCache.get(item.token)?.ok && poolCache.get(positionKey(pair.market))?.expires>Date.now() && !routeCache.has(positionKey(pair.market)) && !routePending.has(positionKey(pair.market)));
+        if (next) {
+          const market = next.pair.market;
+          const routeKey=positionKey(market);
+          routePending.add(routeKey);routeActive++;
+          nextJupiter=Date.now()+2050;
+          void (async () => {
+          try {
+            const pool = poolCache.get(positionKey(market));
+            if(!pool || pool.expires<=Date.now())throw new Error("Poolitarkistus vanhentui");
+            if (pool.status !== "approve") {
+              routeCache.set(positionKey(market), { ...pool, expires: Date.now() + 30000 });
+            } else {
+              if (!solQuote || Date.now() - solQuote.at > 15000) solQuote = await currentMarket(signal);
+              const orderUsd = policy.strategy === 8 ? Math.min(policy.momentumMaxUsd, policy.orderUsd)
+                : strategySettings(policy, next.profile === "sniper" ? 6 : 5).orderUsd;
+              const depth = assessEntryDepth(pool,market,orderUsd,solQuote.price,policy[next.profile+"MaxImpact"]??5);
+              if(depth.status==="reject"||depth.status==="watch"){
+                routeCache.set(positionKey(market),{...depth,expires:Date.now()+15000});
+              } else {
+              const route = await analyzeEntryRoute(market.token, orderUsd, {
+                signal, solUsd: solQuote.price, apiKey: jupiterKey, taker: simulationWallet || undefined,
+                slippageBps: 100, checkExit: policy.strategy === 8, requestQuote
+              });
+              routeCache.set(positionKey(market), { status: route.allowed ? "approve" : "reject",
+                entryImpactPct: route.impact,
+                reason: `${pool.protocol} · ${depth.reason} · ${route.reason} (${route.score}/100)${route.simulation ? ` · simulaatio ${route.simulation}` : ""}`,
+                expires: Date.now() + (route.allowed ? 8000 : 30000) });
+              }
+            }
+          } catch (error) {
+            if(error.status===429 || /429|rate limit/i.test(error.message)){routeLimit=1;nextJupiter=Math.max(nextJupiter,Date.now()+Math.max(60000, error.retryAfterMs ?? 0));}
+            routeCache.set(positionKey(market), { status: "watch", reason: error.message, expires: Date.now() + 15000 });
+          } finally {
+            routePending.delete(routeKey);routeActive--;
+            wake(next.item);
+          }
+          })();
+        }
+      }
+      if (signal.aborted) return;
+      const candidates = [];
+      for (const { item, pair, decision, quality, strategy, profile } of ranked) {
+        const authority = mintCache.get(item.token)?.ok;
+        const report = rugCache.get(item.token);
+        const rug = rugCeiling > 0 ? report?.ok : true;
+        const cachedRoute = pair && policy.strategy >= 5 ? routeCache.get(positionKey(pair.market)) : null;
+        const route = cachedRoute?.expires > Date.now() ? cachedRoute : null;
+        let checked = decision;
+        let reason = strategy?.reason ?? (pair ? "Markkinadata tarkistettu" : "Poolin hintadata puuttuu");
+        if (decision === "approve") {
+          if (authority === false) { checked = "reject"; reason = "Mintin omistaja tai minttaus-/jäädytysvaltuus"; }
+          else if (rug === false) { checked = "reject"; reason = report.reason || "RugCheck hylkäsi"; }
+          else if (authority !== true || rug !== true) { checked = "watch"; reason = report?.reason || "Odotetaan turvallisuustarkistusta"; }
+          else if (policy.strategy >= 5) {
+            checked = route?.status === "unsupported" ? "watch" : route?.status ?? "watch";
+            reason = route?.reason ?? "Odotetaan pooli- ja Jupiter-analyysiä";
+          }
+        } else if (quality?.tier === "reject") reason = "Virheellinen markkinadata";
+        if (!item.attempts) {
+          discoverySamples++;
+          discoveryMs += Date.now() - item.seen;
+        }
+        analysisTotal++;
+        analysisMs += Date.now() - started;
+        recent.analyzed.push(Date.now());
+        if (item.decision !== checked || item.reason !== reason) {
+          publish(item.token, checked, reason, strategy?.score, quality?.score, marketSnapshot(pair?.market));
+        }
+        item.reason = reason;
+        queue.finish(item, checked, pair?.raw, now);
+        if (decision === "approve" && checked === "watch" && authority === true && rug === true &&
+            !route && !routePending.has(positionKey(pair.market)) && poolCache.get(positionKey(pair.market))?.status === "approve") {
+          item.due = Math.min(item.due, Math.max(Date.now() + 500, nextJupiter));
+        }
+        if (checked === "approve") {
+          if (route) item.due = Math.min(item.due, route.expires);
+          candidates.push({ ...pair.market, score: strategy?.score, analysisReason: strategy?.reason, verification: reason, tradeStrategy: policy.strategy === 8 ? 8 : policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: pair.observedAt, priority: item.priority, routeExpires: route?.expires, entryImpactPct: route?.entryImpactPct });
+        }
+      }
+      approvedTicks = [...candidates, ...approvedTicks.filter(tick => !batch.some(item => item.token === tick.token))]
+        .filter(tick => now - tick.at <= maxTickAge)
+        .sort((a, b) => b.priority - a.priority).slice(0, 120);
+    } catch (error) {
+      if (!signal.aborted) {
+        sourceError = `Analyysihaku: ${error.message}`;
+        adaptiveLimit = Math.max(1, Math.floor(adaptiveLimit / 2));
+        marketCooldown = Date.now() + (error.status === 429 ? Math.max(60000, error.retryAfterMs ?? 0) : 3000);
+      }
+    } finally {
+      queue.release(batch, Date.now());
+      processing -= batch.length;
+      activeWorkers--;
+      show();
     }
+  }
+
+  async function analyze() {
+    const pending = new Set();
+    const availableCores = globalThis.navigator?.hardwareConcurrency ?? 4;
+    const deviceLimit = Math.min(workerLimit, Math.max(4, availableCores * 4));
+    while (!signal.aborted) {
+      const now = Date.now();
+      if (now - lastScale >= 5000 && now >= marketCooldown) {
+        lastScale = now;
+        const demand = Math.max(1, Math.ceil(queue.snapshot(now, scanProfile).queued / batchLimit) + activeWorkers);
+        adaptiveLimit = Math.min(deviceLimit, demand, adaptiveLimit + 1);
+      }
+      if (activeWorkers < adaptiveLimit && now >= marketCooldown && now >= nextMarketRequest) {
+        const batch = queue.take(now, scanProfile);
+        if (batch.length) {
+          nextMarketRequest = now + 350;
+          processing += batch.length;
+          activeWorkers++;
+          peakWorkers = Math.max(peakWorkers, activeWorkers);
+          const task = analyzeBatch(batch, now).finally(() => pending.delete(task));
+          pending.add(task);
+        }
+      }
+      show();
+      await pause(pending.size ? 125 : 250, signal);
+    }
+    await Promise.allSettled(pending);
   }
 
   async function enrich() {
@@ -506,13 +637,14 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         }
         if (signal.aborted) return;
         // Prioritize risk exits before computing candidate indicators.
+        let exitBook;
         if(prices.length && policy.strategy>=5 && !rules && !copyWallets?.length){
-          const exitAt=Date.now();
-          await commit(prices.filter(t=>exitAt>=t.at&&exitAt-t.at<=maxTickAge).map(t=>({...t,sellPool:sellPoolCache.get(positionKey(t)),observedAt:t.at,at:exitAt,exitsOnly:true})),()=>0,()=>false);
+          const exitAt = Math.max(Date.now(), (portfolio.lastScanAt ?? 0) + 1);
+          exitBook = await commit(prices.filter(t=>exitAt>=t.at&&exitAt-t.at<=maxTickAge).map(t=>({...t,sellPool:sellPoolCache.get(positionKey(t)),observedAt:t.at,at:exitAt,exitsOnly:true})),()=>0,()=>false);
         }
         const ticks = [...(policy.strategy>=5&&!rules&&!copyWallets?.length?[]:prices), ...candidates.filter(tick => tracked.has(positionKey(tick)) &&
           !heldKeys.has(positionKey(tick)) && usedPrices.get(positionKey(tick)) !== tick.at)];
-        const at = Math.max(Date.now(), (portfolio.lastScanAt??0)+1);
+        const at = Math.max(Date.now(), (exitBook?.lastScanAt ?? portfolio.lastScanAt ?? 0) + 1);
         const fresh = ticks.filter(tick => at >= tick.at && at - tick.at <= maxTickAge);
         for (const tick of fresh) {
           const key = positionKey(tick);
@@ -577,10 +709,15 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         }
         if (copy === copySignals && fresh.length) copySignals = new Map();
         if (signal.aborted) return;
+        tradeCount = updated.totalTrades ?? updated.trades.length;
+        if (updated.trades[0]?.at > lastFillAt) {
+          lastFillAt = updated.trades[0].at;
+          lastFill = `${updated.trades[0].side} · ${updated.trades[0].symbol}`;
+        }
         failures = priceError ? failures + 1 : 0;
         const message = priceError ? `Skannaus yrittää uudelleen: ${priceError.message}`
           : `Hinnat ${prices.length}/${held.length} avoimelle poolille`;
-        report(message, updated, fresh);
+        report(message, updated, [...prices, ...fresh]);
       } catch (error) {
         if (signal.aborted) return;
         report(`Skannaus yrittää uudelleen: ${error.message}`);
@@ -590,7 +727,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
     }
   }
 
-  await Promise.all([discover(), ...Array.from({length:workerLimit}, (_, id) => analyze(id)), enrich(), positions()]);
+  await Promise.all([discover(), analyze(), enrich(), positions()]);
 }
 
 export function assessEntryDepth(pool,market,usd,solUsd,maxImpact=5){

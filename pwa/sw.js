@@ -1,5 +1,5 @@
-const cacheName = "screener-paper-v31";
-const files = ["./", "./app.js", "./dashboard-nav.js", "./visual-rules.js", "./live-adapter.js", "./network.js", "./wallet-standard.js", "./policy.js", "./markets.js", "./market-panel.js", "./rules.js", "./copy.js", "./jupiter.js", "./scanner.js", "./trojan-analysis.js", "./trojan-discovery.js", "./trojan-entry.js", "./trojan-pools.js", "./trojan-security.js", "./devnet.js", "./style.css", "./engine.wasm", "./manifest.webmanifest",
+const cacheName = "screener-paper-v33";
+const files = ["./", "./index.html", "./app.js", "./dashboard-nav.js", "./visual-rules.js", "./live-adapter.js", "./network.js", "./wallet-standard.js", "./policy.js", "./markets.js", "./market-panel.js", "./rules.js", "./copy.js", "./jupiter.js", "./scanner.js", "./candidate-analyst.js", "./analyst-worker.js", "./momentum.js", "./agent-dashboard.js", "./trojan-analysis.js", "./trojan-discovery.js", "./trojan-entry.js", "./trojan-pools.js", "./trojan-security.js", "./devnet.js", "./style.css", "./engine.wasm", "./manifest.webmanifest",
   "./icon-192.png", "./icon-512.png", "./LICENSE"];
 
 self.addEventListener("install", event => {
@@ -16,6 +16,14 @@ self.addEventListener("fetch", event => {
   if (request.method !== "GET" || new URL(request.url).origin !== self.location.origin) return;
   event.respondWith(caches.open(cacheName).then(async cache => {
     const cached = await cache.match(request);
-    return cached || fetch(request);
+    if (cached) return cached;
+    try { return await fetch(request); }
+    catch (error) {
+      if (request.mode === "navigate" && new URL(request.url).href.startsWith(self.registration.scope)) {
+        const shell = await cache.match(new URL("./", self.registration.scope).href);
+        if (shell) return shell;
+      }
+      throw error;
+    }
   }));
 });

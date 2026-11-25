@@ -10,6 +10,8 @@ import { ruleSignal, validateRules } from "./rules.js";
 import { formatAtomic, readQuote, simulateSwap } from "./jupiter.js";
 import { copyGroup, recentSwaps } from "./copy.js";
 import { address as solanaAddress } from "./markets.js";
+import { equityDashboard, renderFeed, showAgents, tokenBadge } from "./agent-dashboard.js";
+import { momentumTrailingDistance } from "./momentum.js";
 import { mountMarkets } from "./market-panel.js";
 
 const byId = id => document.getElementById(id);
@@ -44,6 +46,53 @@ let selection = solMarket;
 let rules;
 let timeframe = "5m";
 let events = [];
+let scanEvents = [];
+let scanPortfolio;
+const agentActivity = new Map();
+let lastStats;
+let lastFeedAt = 0;
+let pendingScanEvents = [];
+let renderingFeed = false;
+let closingPosition = false;
+
+function refreshFeed() {
+  if (renderingFeed) return;
+  renderingFeed = true;
+  requestAnimationFrame(() => {
+    renderingFeed = false;
+    const fills = (scanPortfolio?.trades ?? []).slice(0, 45).map(trade => ({
+      at: trade.at, mint: trade.token, status: `Toteutunut ${trade.side.toLowerCase()}`, score: trade.score,
+      market: { ...trade.market, price: trade.price, symbol: trade.symbol },
+      reason: [Number.isFinite(trade.notional) ? usd.format(trade.notional) : "",
+        Number.isFinite(trade.feeUsd) ? `kulut ${usd.format(trade.feeUsd)}` : "",
+        Number.isFinite(trade.realizedPnl) ? `P/L ${usd.format(trade.realizedPnl)}` : ""].filter(Boolean).join(" · ")
+    }));
+    renderFeed([...scanEvents, ...(scanPortfolio?.decisions ?? []), ...fills].sort((a, b) => b.at - a.at));
+  });
+}
+
+async function persistScanEvents() {
+  const rows = pendingScanEvents;
+  if (!rows.length) return;
+  pendingScanEvents = [];
+  lastFeedAt = Date.now();
+  const transaction = database.transaction("books", "readwrite");
+  const books = transaction.objectStore("books");
+  const read = books.get("scan-events");
+  read.onsuccess = () => {
+    const combined = new Map([...rows, ...(read.result ?? [])].map(row =>
+      [JSON.stringify([row.at, row.mint, row.status, row.reason]), row]));
+    books.put([...combined.values()].sort((a, b) => b.at - a.at).slice(0, 240), "scan-events");
+  };
+  await new Promise((resolve, reject) => {
+    transaction.oncomplete = resolve;
+    transaction.onabort = () => reject(transaction.error);
+  }).catch(error => {
+    pendingScanEvents = [...pendingScanEvents, ...rows].slice(0, 240);
+    logEvent(`Analyysilokia ei tallennettu: ${error?.message ?? "paikallinen tallennusvirhe"}`);
+  });
+}
+
 let copyWallets = [];
 const settlementKey = account => `settlements:${account}:${selection.token}`;
 
@@ -235,6 +284,12 @@ function setButtons() {
 }
 
 function stop(message) {
+  if (database) void persistScanEvents();
+  if (lastStats) {
+    lastStats = { ...lastStats, activeWorkers: 0, adaptiveLimit: 0, pump: "Pysäytetty",
+      foundPerMinute: 0, signalsPerMinute: 0 };
+    showAgents(lastStats, agentActivity);
+  }
   run?.abort();
   run = undefined;
   byId("slot").textContent = "—";
@@ -269,7 +324,7 @@ byId("emergency").onclick = async () => {
 function renderPerformance(trades) {
   const target=byId("trade-performance");
   const sales=trades.filter(t=>t.side==="Myynti"&&Number.isFinite(t.realizedPnl));
-  target.replaceChildren(...[["Kaikki",sales],["Main",sales.filter(t=>t.strategy===5)],["Sniper",sales.filter(t=>t.strategy===6)]].map(([name,items])=>{
+  target.replaceChildren(...[["Kaikki",sales],["Main",sales.filter(t=>t.strategy===5)],["Sniper",sales.filter(t=>t.strategy===6)],["Momentum",sales.filter(t=>t.strategy===8)]].map(([name,items])=>{
     const wins=items.filter(t=>t.realizedPnl>0), gross=wins.reduce((s,t)=>s+t.realizedPnl,0), loss=-items.filter(t=>t.realizedPnl<0).reduce((s,t)=>s+t.realizedPnl,0);
     const p=document.createElement("p");p.textContent=`${name} · Myynnit ${items.length} · Win rate ${items.length?(100*wins.length/items.length).toFixed(1)+" %":"—"} · Profit factor ${loss?(gross/loss).toFixed(2):gross?"∞":"—"} · P/L ${items.length?usd.format(gross-loss):"—"}`;return p;
   }));
@@ -278,9 +333,24 @@ function renderPerformance(trades) {
   if(!sales.length)return;let total=0;const points=[0,...sales.slice().reverse().map(t=>total+=t.realizedPnl)];const lo=Math.min(...points),hi=Math.max(...points);ctx.strokeStyle="#89e8c1";ctx.lineWidth=2;ctx.beginPath();points.forEach((v,i)=>{const x=10+i*(canvas.width-20)/(points.length-1),y=10+(hi-v)/(hi-lo||1)*(canvas.height-20);if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);});ctx.stroke();
 }
 function renderScan(portfolio, ticks = []) {
+  const previous = scanPortfolio;
+  scanPortfolio = portfolio;
   const positions = Object.values(portfolio.positions);
   const equity = portfolio.cash + positions.reduce((sum, p) => sum + p.sol * p.mark, 0);
-  byId("home-equity").textContent = usd.format(equity);
+  if (mode() === "paper") equityDashboard(portfolio, equity);
+  const decision = portfolio.decisions?.[0];
+  if (previous?.decisions?.[0]?.at !== decision?.at) {
+    refreshFeed();
+    if (decision) {
+      agentActivity.set("brain", { ...decision, reason: `${decision.state} · ${decision.reason}` });
+      if (decision.state === "REJECT") agentActivity.set("risk", decision);
+    }
+  }
+  if (portfolio.trades[0]?.at !== previous?.trades[0]?.at) {
+    const trade = portfolio.trades[0];
+    if (trade) agentActivity.set("fill", { at: trade.at, reason: `${trade.side} · ${trade.symbol} · ${usd.format(trade.notional ?? trade.price)}` });
+    renderPerformance(portfolio.trades);
+  } else if (!previous) renderPerformance(portfolio.trades);
   byId("home-cash").textContent = usd.format(portfolio.cash);
   byId("home-pnl").textContent = usd.format(portfolio.realized);
   byId("home-count").textContent = String(positions.length);
@@ -291,11 +361,31 @@ function renderScan(portfolio, ticks = []) {
     return item;
   }));
   if (ticks.length) rows("scan-markets", ticks.map(t => `${t.symbol || t.token} · ${priceUsd.format(t.price)}`));
-  rows("scan-positions", positions.map(p =>
-    `${p.market.symbol} · ${amount.format(p.sol)} · viimeisin P/L ${usd.format(p.mark * p.sol - p.cost)}`));
-  renderPerformance(portfolio.trades);
-  rows("scan-trades", portfolio.trades.slice(0, 20).map(t =>
-    `${new Date(t.at).toLocaleTimeString("fi-FI")} · ${t.side} · ${t.symbol} · ${priceUsd.format(t.price)} · ${reasons[t.reason]}`));
+  byId("scan-positions").replaceChildren(...positions.map(position => {
+    const item = document.createElement("li");
+    const title = document.createElement("b");
+    const entry = position.cost / position.sol;
+    const value = position.mark * position.sol;
+    const pnl = value - position.cost;
+    title.textContent = [position.name, position.market.symbol].filter(Boolean).join(" · ") || position.market.token;
+    const change = document.createElement("p");
+    change.textContent = `${usd.format(value)} · ${usd.format(pnl)} (${(100 * pnl / position.cost).toFixed(2)} %)`;
+    change.className = pnl >= 0 ? "positive" : "negative";
+    const mark = document.createElement("p");
+    const distance = position.strategy === 8 ? momentumTrailingDistance(position.change5, settings) : settings.trailing;
+    mark.textContent = `Osto ${priceUsd.format(entry)} · Nyt ${priceUsd.format(position.mark)} · Huippu ${priceUsd.format(position.peak)} · ${amount.format(position.sol)} kpl · ${Math.floor((Date.now() - position.openedAt) / 60000)} min`;
+    const risk = document.createElement("p");
+    risk.textContent = `HOLD${distance ? ` · Trailing-viite ${priceUsd.format(position.peak * (1 - distance / 100))}` : ""} · Hinta ${new Date(position.lastTickAt).toLocaleTimeString("fi-FI")}`;
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "secondary";
+    close.textContent = "Sulje paperipositio";
+    close.onclick = () => closePaperPosition(position.market);
+    item.append(tokenBadge(position.market.symbol, position.market.token), title, change, mark, risk, close);
+    return item;
+  }));
+  if (portfolio.trades[0]?.at !== previous?.trades[0]?.at || !previous) rows("scan-trades", portfolio.trades.slice(0, 20).map(t =>
+    `${new Date(t.at).toLocaleTimeString("fi-FI")} · ${t.side} · ${t.symbol} · ${priceUsd.format(t.price)} · ${t.detail || reasons[t.reason]}${Number.isFinite(t.realizedPnl) ? ` · P/L ${usd.format(t.realizedPnl)}` : ""}`));
 }
 
 function commitScan(ticks, decide, eligible, policy, signal) {
@@ -306,12 +396,13 @@ function commitScan(ticks, decide, eligible, policy, signal) {
     const read = books.get(scanKey);
     let portfolio;
     read.onsuccess = () => {
-      portfolio = read.result ?? newPortfolio();
+      portfolio = read.result ?? newPortfolio(policy.paperCapital);
       if (signal.aborted || document.visibilityState !== "visible") return;
       try {
         if (locked.result === true) throw new Error("Hätäpysäytys on lukittu.");
+        const lastScanAt = portfolio.lastScanAt;
         advancePortfolio(portfolio, ticks, engine, policy, decide, eligible);
-        books.put(portfolio, scanKey);
+        if (portfolio.lastScanAt !== lastScanAt) books.put(portfolio, scanKey);
       } catch (error) {
         reject(error);
         transaction.abort();
@@ -320,6 +411,26 @@ function commitScan(ticks, decide, eligible, policy, signal) {
     transaction.oncomplete = () => resolve(portfolio);
     transaction.onabort = () => reject(transaction.error ?? new Error("Skannaussalkun kirjoitus keskeytyi."));
   });
+}
+
+async function closePaperPosition(market) {
+  if (mode() !== "paper" || emergency || changingInterlock || closingPosition || !confirm(`Suljetaanko simuloitu positio ${market.symbol || market.token}?`)) return;
+  closingPosition = true;
+  const request = new AbortController();
+  try {
+    const tick = await poolPrice(market, request.signal);
+    if (mode() !== "paper" || emergency || changingInterlock || document.visibilityState !== "visible") return;
+    const previous = await stored(scanKey);
+    const updated = await commitScan([{ ...tick, at: Math.max(Date.now(), (previous?.lastScanAt ?? 0) + 1),
+      observedAt: tick.at, manual: true, exitsOnly: true }], () => 0, () => false, settings, request.signal);
+    renderScan(updated, [tick]);
+    if (Object.values(updated.positions).some(item => item.market.pool === market.pool && item.market.token === market.token)) {
+      throw new Error("Positio jäi avoimeksi. Hinta vaihtui samaan aikaan, joten voit yrittää uudelleen.");
+    }
+    logEvent(`Paper-position ${market.symbol || market.token} manuaalinen sulkeminen käsitelty.`);
+  } catch (error) {
+    byId("status").textContent = error.message;
+  } finally { closingPosition = false; }
 }
 
 async function startScan() {
@@ -334,6 +445,7 @@ async function startScan() {
     byId("scan-status").textContent = "Anna kelvollinen julkinen Solana-osoite.";
     return;
   }
+  agentActivity.clear();
   byId("scan-events").replaceChildren();
   if ((policy.strategy === 4 && !copyWallets.length) || (policy.strategy === 3 && !rules)) {
     byId("scan-status").textContent = "Tallenna ehtopuu tai Copy Trading -lompakko valitulle strategialle.";
@@ -347,12 +459,17 @@ async function startScan() {
   byId("scan-status").textContent = "Haetaan pooleja…";
   byId("status").textContent = "Automaattinen Paper-skannaus käynnissä.";
   try {
-    const load = async () => await stored(scanKey) ?? newPortfolio();
-    const samples = [];
-    const rejectionReasons = new Map();
+    const load = async () => await stored(scanKey) ?? newPortfolio(policy.paperCapital);
     const tokenResults = new Map();
     const filter = byId("token-status-filter"), query = byId("token-filter-query"), results = byId("token-filter-results");
     function renderTokens(){const q=query.value.trim();const rows=[...tokenResults.values()].reverse().filter(e=>(filter.value==="all"||e.status===filter.value)&&(!q||e.mint.includes(q))).slice(0,100);results.replaceChildren(...rows.map(e=>{const li=document.createElement("li");const label=document.createElement("p");label.textContent=`${e.mint} · ${e.status} · ${e.score??"—"}/100 · ${e.reason}`;const b=document.createElement("button");b.type="button";b.className="secondary";b.textContent="Tutki markkinaa";b.onclick=()=>{const form=byId("market-search");form.elements.query.value=e.mint;form.elements.liquidity.value="0";form.elements.volume.value="0";form.closest("details").open=true;const submit=form.querySelector("button");if(!submit.disabled)form.requestSubmit(submit);form.scrollIntoView({block:"start"});};li.append(label,b);return li;}));}
+    let scheduleTokens = false;
+    const updateTokens = () => {
+      if (scheduleTokens || byId("scan-panel").classList.contains("inactive-page")) return;
+      scheduleTokens = true;
+      setTimeout(() => { scheduleTokens = false; renderTokens(); }, 450);
+    };
+    byId("dashboard-nav").addEventListener("click", updateTokens, { signal: controller.signal });
     filter.onchange=renderTokens;query.oninput=renderTokens;renderTokens();
     byId("filter-reasons").replaceChildren();
     await runScanner({ engine, policy, rules: policy.strategy === 3 ? rules : null, timeframe,
@@ -360,48 +477,50 @@ async function startScan() {
       event(entry) {
         tokenResults.delete(entry.mint);tokenResults.set(entry.mint,entry);
         if(tokenResults.size>2000)tokenResults.delete(tokenResults.keys().next().value);
-        renderTokens();
+        updateTokens();
+        pendingScanEvents.unshift(entry);
+        pendingScanEvents.length = Math.min(pendingScanEvents.length, 240);
+        scanEvents.unshift(entry);
+        scanEvents.length = Math.min(scanEvents.length, 240);
+        agentActivity.set(entry.status === "found" ? "found" : "analysis", entry);
+        if (entry.status === "approve" || entry.status === "watch") agentActivity.set("brain", entry);
+        if (entry.status === "reject") agentActivity.set("risk", entry);
+        refreshFeed();
         const row = document.createElement("li");
         const label = { found: "Löytyi", approve: "Hyväksytty", watch: "Odottaa", reject: "Hylätty" }[entry.status];
         row.textContent = `${new Date(entry.at).toLocaleTimeString("fi-FI")} · ${label} · ${entry.mint}${entry.score == null ? "" : ` · strategia ${entry.score}/100`}${entry.quality == null ? "" : ` · laatu ${entry.quality}/100`} · ${entry.reason}`;
-        if (entry.status === "reject") {
-          rejectionReasons.set(entry.reason, (rejectionReasons.get(entry.reason) ?? 0) + 1);
-          byId("filter-reasons").replaceChildren(...[...rejectionReasons].sort((a,b)=>b[1]-a[1]).slice(0,10).map(([reason,count])=>{ const p=document.createElement("p"); p.textContent=`${count} · ${reason}`; return p; }));
-        }
         const list = byId("scan-events");
         list.prepend(row);
         if (list.children.length > 60) list.lastElementChild.remove();
       },
       commit: (ticks, decide, eligible) => commitScan(ticks, decide, eligible, policy, controller.signal),
       telemetry(stats) {
-      const total = stats.analyzed || 0;
-      byId("filter-summary").textContent = `Analysoidut ${total} · Hyväksytyt ${stats.approved} · Hylätyt ${stats.rejected} · Odottavat ${stats.waiting}`;
-      byId("monitor-summary").textContent = `PumpPortal ${stats.pump} · Työntekijät ${stats.activeWorkers ?? 0}/${stats.adaptiveLimit ?? 0} (max ${stats.workerLimit ?? 24}) · Keskimääräinen analyysierä ${stats.averageAnalysisMs ?? 0} ms`;
-      byId("monitor-sources").replaceChildren(...(stats.sources ?? []).map(source => {
-        const p = document.createElement("p");
-        p.textContent = `${source.name}: ${source.error || (source.busy ? "Haetaan" : "Viimeisin haku: "+source.count)}`;
-        return p;
-      }));
-        const now = Date.now();
-        if (!samples.length || now - samples.at(-1).at >= 1000) samples.push({at:now,found:stats.found,analyzed:stats.analyzed});
-        while (samples.length > 1 && samples[1].at <= now - 60000) samples.shift();
-        const first = samples[0];
-        const elapsed = (now - first.at) / 60000;
-        const rate = key => elapsed >= 0.1 ? Math.round((stats[key] - first[key]) / elapsed) : "–";
+        lastStats = stats;
+        showAgents(stats, agentActivity);
+        if (Date.now() - lastFeedAt > 10000) void persistScanEvents();
+        byId("filter-summary").textContent = `Analysoidut ${stats.analyzed} · Hyväksytyt ${stats.approved} · Hylätyt ${stats.rejected} · Odottavat ${stats.waiting}`;
+        byId("filter-reasons").replaceChildren(...stats.reasons.map(([reason, count]) => {
+          const p = document.createElement("p");
+          p.textContent = `${count} · ${reason}`;
+          return p;
+        }));
+        byId("monitor-summary").textContent = `PumpPortal ${stats.pump} · Työntekijät ${stats.activeWorkers}/${stats.adaptiveLimit} (max ${stats.workerLimit}) · Analyysi ${stats.averageAnalysisMs} ms/token · Löydöstä analyysiin ${stats.averageDiscoveryMs} ms`;
+        const sources = [...stats.sources.map(source => [source.name, source.error || (source.busy ? "Haetaan" :
+          source.count == null ? "Odottaa" : `Viime haussa ${source.count}`)]), ...Object.entries(stats.apis)];
+        byId("monitor-sources").replaceChildren(...sources.map(([name, state]) => {
+          const p = document.createElement("p");
+          p.textContent = `${name} · ${state}`;
+          return p;
+        }));
         byId("scan-counts").textContent = `Löydetyt ${stats.found} · Analysoidut ${stats.analyzed} · Hylätyt ${stats.rejected} · Hyväksytyt ${stats.approved}`;
-        byId("scan-queue").textContent = `Main ${stats.mainQueue ?? 0} · Sniper ${stats.sniperQueue ?? 0} · Löydöt/min ${rate("found")} · Analyysit/min ${rate("analyzed")} · Jono ${stats.queued} · Käsittelyssä ${stats.processing} · Uudelleenhaku ${stats.waiting} · Ohitetut ${stats.dropped} · PumpPortal ${stats.pump}${stats.sourceError ? ` · ${stats.sourceError}` : ""}`;
-        let panel = byId("scan-source-stats");
-        if (!panel) {
-          panel = document.createElement("pre");
-          panel.id = "scan-source-stats";
-          panel.style.whiteSpace = "pre-wrap";
-          byId("scan-queue").after(panel);
-        }
-        panel.textContent = (stats.sources ?? []).map(s => `${s.name}: ${s.count} · ${s.busy ? "Haetaan" : s.error ? "Virhe: " + s.error : "Valmis / odottaa"}`).join("\n");
+        byId("scan-queue").textContent = `Löydöt/min ${stats.foundPerMinute} · Analyysit/min ${stats.analyzedPerMinute} (ml. uusinnat) · Ostosignaalit/min ${stats.signalsPerMinute} · Kaupat ${stats.tradeCount} · Jono ${stats.queued} · Käsittelyssä ${stats.processing} · Uudelleenhaku ${stats.waiting} · Ohitetut ${stats.dropped}`;
       },
       report(message, portfolio, ticks) {
         if (controller.signal.aborted) return;
         byId("scan-status").textContent = message;
+        if (message.startsWith("Skannaus yrittää uudelleen")) {
+          agentActivity.set("executionError", { at: Date.now(), reason: message });
+        }
         if (portfolio) renderScan(portfolio, ticks);
         else logEvent(message);
       }
@@ -595,6 +714,8 @@ async function renderMode() {
   byId("open-panel").hidden = isLive;
   renderSettlements([]);
   byId("quote-result").textContent = "";
+  byId("home-equity").closest("section").hidden = isLive;
+  byId("scan-positions").closest("section").hidden = isLive;
   if (isLive) {
     renderLive();
     byId("status").textContent = live.ready
@@ -628,8 +749,10 @@ byId("settings").onsubmit = async event => {
     const updated = validateSettings(Object.fromEntries(
       Array.from(new FormData(event.target), ([name, value]) => [name, value === "" ? NaN : Number(value)])
     ));
+    if (mode() === "live" && updated.strategy === 8) throw new Error("Aggressive Momentum on käytössä Paper Trading -tilassa.");
     await stored(settingsKey(), updated);
     settings = updated;
+    if (mode() === "paper") renderScan(await stored(scanKey) ?? newPortfolio(settings.paperCapital));
     setButtons();
     byId("status").textContent = "Asetukset tallennettu.";
   } catch (error) {
@@ -907,7 +1030,12 @@ try {
     byId("rule-json").value = JSON.stringify({ entry: rules.entry, exit: rules.exit }, null, 2);
   }
   byId("timeframe").value = timeframe;
-  mountMarkets({ selection: () => selection, select: async market => {
+  mountMarkets({
+    history: mint => ({
+      fills: (scanPortfolio?.trades ?? []).filter(trade => trade.token === mint),
+      decisions: [...scanEvents, ...(scanPortfolio?.decisions ?? [])].filter(row => row.mint === mint).sort((a, b) => b.at - a.at)
+    }),
+    selection: () => selection, select: async market => {
     if (run || signing || mode() === "live") throw new Error("Valitse markkina pysäytetyssä Paper-tilassa.");
     await stored("market", market);
     selection = market;
@@ -920,7 +1048,9 @@ try {
   }
   byId("mode").value = "paper";
   await renderMode();
-  renderScan(await stored(scanKey) ?? newPortfolio());
+  scanEvents = await stored("scan-events") ?? [];
+  refreshFeed();
+  renderScan(await stored(scanKey) ?? newPortfolio(settings.paperCapital));
   navigator.serviceWorker?.register("./sw.js").catch(error => console.warn(error));
 } catch (error) {
   byId("status").textContent = `Käynnistys epäonnistui. ${error.message}`;

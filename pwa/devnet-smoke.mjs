@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
 
+const view = (page, pageName) => page.locator(`#dashboard-nav [data-view="${pageName}"]`).click();
 const browser = await chromium.launch({ executablePath: process.env.SCREENER_CHROMIUM });
 const site = process.env.SCREENER_PWA_URL ?? "http://127.0.0.1:8018/";
 try {
@@ -27,7 +28,7 @@ try {
   });
   await page.goto(site);
   await page.locator("#mode").selectOption("live");
-  await page.getByText("Devnet-tapahtumatesti").click();
+  await view(page, "settings");
   await page.locator("#devnet-create").click();
   await page.locator("#devnet-wallet").getByText(/[1-9A-HJ-NP-Za-km-z]{32,44}/).waitFor();
   await page.locator("#devnet-send").click();
@@ -36,7 +37,7 @@ try {
   assert.equal(await page.locator("#devnet-send").isDisabled(), true);
   await page.reload();
   await page.locator("#mode").selectOption("live");
-  await page.getByText("Devnet-tapahtumatesti").click();
+  await view(page, "settings");
   assert.equal(await page.locator("#devnet-wallet").innerText(), "");
   await page.locator("#devnet-sync").click();
   await page.locator("#devnet-history").getByText(/finalized/).waitFor();

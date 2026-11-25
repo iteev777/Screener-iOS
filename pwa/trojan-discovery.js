@@ -89,7 +89,7 @@ export async function marketBatch(tokens, signal) {
     const market = normalizePair(raw);
     if (!market || !requested.has(market.token)) continue;
     if (!best.has(market.token) || market.liquidity > best.get(market.token).market.liquidity) {
-      best.set(market.token, { market, raw });
+      best.set(market.token, { market, raw, observedAt: Date.now() });
     }
   }
   for(const token of missing)cache.set(token,{value:best.get(token),expires:now+(best.has(token)?5000:3000)});
@@ -178,13 +178,13 @@ export class CandidateQueue {
     return discovered;
   }
 
-  take(now) {
+  take(now, profile) {
     for (const map of [this.items, this.sniperItems]) for (const [mint, entry] of map) {
       const sniper = entry.sources.size === 1 && entry.sources.has("PumpPortal");
       if (!entry.inFlight && now - (sniper ? entry.seen : entry.lastSeen) >= (sniper ? 300000 : 600000)) map.delete(mint);
     }
     const rank=item=>(item.priority??0)+(item.sources.has("PumpPortal")?20:0)+(item.attempts===0?15:0)+Math.min(120,Math.max(0,now-item.due)/1000)+Math.min(10,item.sources.size*2);
-    return this.entries().filter(item => item.due <= now && !item.inFlight)
+    return this.entries().filter(item => item.due <= now && !item.inFlight && (profile !== "sniper" || item.sources.has("PumpPortal")))
       .sort((a,b)=>rank(b)-rank(a)||a.due-b.due).slice(0, 30).map(item => { item.inFlight = true; return item; });
   }
 
@@ -197,15 +197,15 @@ export class CandidateQueue {
     item.decision = result;
     item.attempts++;
     item.priority = raw ? candidateQuality(raw, item.sources, now).score : 0;
-    item.due = now + (result === "watch" ? Math.min(30000,10000+Math.max(0,item.streak-2)*3000) : result === "approve" ? 15000 : Math.min(180000,60000*item.streak));
+    item.due = now + (result === "watch" ? 10000 : result === "approve" ? 15000 : Math.min(180000,60000*item.streak));
   }
 
   release(batch, now) {
     for (const item of batch) if (item.inFlight) { item.inFlight = false; item.due = now + 3000; }
   }
 
-  snapshot(now) {
-    const entries = this.entries();
+  snapshot(now, profile) {
+    const entries = this.entries().filter(item => profile !== "sniper" || item.sources.has("PumpPortal"));
     return { ...this.stats, mainQueue: this.items.size, sniperQueue: this.sniperItems.size, queued: entries.filter(item => item.due <= now && !item.inFlight).length,
       waiting: entries.filter(item => item.decision === "watch" && item.due > now).length };
   }

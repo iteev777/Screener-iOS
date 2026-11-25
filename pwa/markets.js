@@ -15,7 +15,8 @@ export function normalizePair(pair) {
   if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(liquidity) || liquidity <= 0) return;
   return { token: pair.baseToken.address, pool: pair.pairAddress, quoteToken: pair.quoteToken?.address,
     symbol: String(pair.baseToken.symbol ?? "").slice(0, 18), price, liquidity,
-    volume: pair.volume?.h24, change: pair.priceChange?.h24, transactions: pair.txns, created: pair.pairCreatedAt };
+    name: pair.baseToken?.name, volume5: pair.volume?.m5, volumeHour: pair.volume?.h1,
+    change5: pair.priceChange?.m5, changeHour: pair.priceChange?.h1, marketCap: pair.marketCap, volume: pair.volume?.h24, change: pair.priceChange?.h24, transactions: pair.txns, created: pair.pairCreatedAt };
 }
 
 export async function searchMarkets(query, bounds, signal) {

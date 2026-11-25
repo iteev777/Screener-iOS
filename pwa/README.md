@@ -82,3 +82,34 @@ Jupiter tarkistaa WSOL-määrän, reittipisteet, hintavaikutuksen ja liukuman. V
 Tekninen vahvistus käyttää 1 min kynttilöitä ja niistä muodostettuja kokonaisia 3 min, 5 min, 15 min, 30 min, 1 h ja 4 h jaksoja. Vajaat tai historiattomat aikavälit eivät anna ääntä. Enintään 480 yhden minuutin kynttilää rajoittaa sitä, kuinka monta pidempää aikaväliä voi lämmetä samasta historiasta.
 
 Selainportti ei kata Trojanin kaikkia ympäristömuuttujilla ohjattuja sääntöjä, kaikkia protokollakohtaisia holvi-, tick-, bin- ja maksulaskelmia, natiivia poolireititystä eikä Live-lähetystä. Poolit, joiden tokenparia ei voi varmistaa tilin asettelusta, jäävät odottamaan. Julkaistun iPhone-selaimen verkkotesti on edelleen avoin.
+
+## Aggressive Momentum ja agenttinäkymät
+
+Valitse **Paper Trading → Settings → Strategia ja riskirajat → Aggressive Momentum (Paper)**, tallenna asetukset ja käynnistä Paper-skannaus. Paper-alkupääoma (oletus 1 000 USD) koskee vasta luotavaa skannaussalkkua. Tallennettu salkku palautetaan edellisestä tilasta. Main, Sniper ja yhdistelmä ovat valittavissa samassa valikossa.
+
+- **Scanner** pitää lähteet, PumpPortal-yhteyden ja deduplikoidun jonon käynnissä erillään positioiden kierrosta. Main- ja Sniper-sanastot sekä pisteytys pohjautuvat Trojan V2:n koodiin. Sniper ottaa analyysijonoon PumpPortal-havainnot. Laajat tunnin välein luettavat katalogit toimivat rajattuina varalähteinä. Palvelukohtaiset tauot huomioivat HTTP 429:n ja luettavissa olevan `Retry-After`-otsakkeen.
+- **Analyst** pisteyttää erät selaimen moduulityöntekijässä. Palvelinpyyntöjen rinnakkaisuutta rajaavat työjonon pituus, laitteen ilmoittama ydinmäärä ja asetuksissa valittu 1–24 erätyöntekijän katto. Mintti-, pooli-, RugCheck- ja Jupiter-tarkistusten valmistuminen voi tuoda ehdokkaan nopeasti uudelleen käsittelyyn. Käytetty markkinadata säilyttää alkuperäisen hakuhetkensä välimuistissa.
+- **Brain** käyttää momentumin pisteisiin markkinalaatua, 5 min ostopainetta ja volyymin kiihtymistä suhteessa 1 h tahtiin sekä hintatrendiä. Aloitusraja on 80/100. Vahva positio voi pysyä avoinna voittotavoitteen yläpuolella. Heikkenevä trendi voi johtaa osittaiseen voitonkotiutukseen tai poistumiseen. Aseta voitto-osuus alle 100 %:iin, jos haluat osamyyntejä. Strategia on sääntöpohjainen.
+- **Executor** laskee Paper-toteumat hinta- ja likviditeettidatasta sekä asetusten kulu- ja liukumamallista. Toteutus, salkku ja päätös kirjataan yhdessä IndexedDB-transaktiossa. Vapautunut käteinen palaa salkkuun. Myyntistatistiikka laskee kirjatut myyntitoteumat mukaan lukien osamyynnit.
+- **Risk** säilyttää mintti-, omistaja-, likviditeetti-, pooli- ja Jupiter-ostotarkistukset. Momentum tarkistaa myös Jupiterin vastakkaisen myyntireitin ja hylkää yli 5 %:n edestakaisen hintavaikutuksen tarjouksissa. Kaupan enimmäiskokoa rajoittavat käteinen, likviditeetti, pisteet ja asetukset. Positioita suojataan kokonaisaltistuksella, tappio- ja ostorajoilla, stop lossilla, break-evenillä, dynaamisella trailing-tasolla sekä likviditeetin putoamiseen perustuvalla poistumisella. Myös manuaalinen paperisulku vaatii tuoreen kelvollisen hinnan.
+
+Home näyttää tallennetuista salkun noteerauksista piirretyn arvokäyrän. Agents näyttää ohjelman rajallisten työjonojen, verkkolähteiden ja kauppakirjan telemetrian. Feed ja tokenin tiedot näyttävät tallennettuja päätöksiä ja kauppoja. Kaavion merkit kohdistuvat saman poolin tallennettuihin Paper-kauppoihin. Jos palvelu ei anna kelvollista hintaa tai reittiä, sovellus jättää simulaatiototeuman tekemättä. Sovelluksen siirtyminen taustalle pysäyttää skannauksen.
+
+Live-tilassa ovat käytettävissä olemassa oleva lompakkoyhteys, ketjussa vahvistettujen Jupiter/USDC-tapahtumien tuonti ja simulaatiopolut. Julkaisussa ei ole ketjuun lähettävää mainnet-adapteria. Aggressive Momentum on Paper-strategia.
+
+Aidon markkinadatan vähintään 15 minuutin Paper-vertailu Node 24:llä:
+
+```sh
+SCREENER_BENCH_PAIRS=/tmp/screener-pairs.jsonl node --use-env-proxy pwa/paper-benchmark.mjs
+```
+
+`SCREENER_BENCH_STRATEGY=5` vaihtaa Mainiin ja `=6` Sniperiin. Testi ajaa selaimen kanssa jaettua moottoria ilman selaimen workeria tai pysyvää salkkua. Tavalliset markkina- ja lukukutsut sallitaan. Transaktioiden lähetys estetään. Valinnainen tiedosto sisältää enintään 300 todellista DEX-parivastausta Main/Sniper-vertailua varten.
+
+Kohdistettu selaintesti:
+
+```sh
+SCREENER_SCANNER_PROFILE=momentum SCREENER_CHROMIUM=/usr/bin/chromium node pwa/scanner-smoke.mjs
+SCREENER_SCANNER_PROFILE=momentum SCREENER_BROWSER=webkit node pwa/scanner-smoke.mjs
+```
+
+GitHub Pages -asennuksessa valitse sivuston lähteeksi **GitHub Actions**. Yhdistämisen ja lisenssin käyttöehdon tarkistuksen jälkeen käynnistä **Publish Screener PWA to GitHub Pages** -työnkulku `main`-haaralta ja merkitse lisenssitarkistus. Kun julkaisu on valmis, avaa Pages-osoite iPhonen Safarissa, napauta **Jaa → Lisää Koti-valikkoon → Lisää** ja käynnistä sovellus kuvakkeesta. Avaa sovellus verkossa kerran, jotta sovelluspaketti tallentuu. Markkinaseuranta tarvitsee toimivan verkon.

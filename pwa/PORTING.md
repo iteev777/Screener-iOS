@@ -75,3 +75,11 @@ Trojan-profiilit käyttävät täyttä RugCheck-raporttia, minttitarkistusta, yh
 Oikea PumpPortal-yhteys toimitti uuden mintin subscribeNewToken-tilauksella. Main-profiilin 40 sekunnin Node-ajossa löytyi ja analysoitiin 113 minttiä. Hylkäyksiä oli 10 ja odottavia 103. Ajo ei avannut kauppaa. Jupiter v2:n oikea WSOL/USDC-tarjous hyväksyttiin pistemäärällä 94,82. Neljän ohjelmatyypin tilit ja mintit varmistuivat 12 aidossa poolissa 14 tarkistetusta tilistä. Oikealla datalla ajettu simulaation onnistumispolku, ulkoiset Safari-yhteydet ja täydellinen Trojan-pariteetti ovat avoinna. Selaimen Paper-ostot ja riskimyynnit todennettiin mallivastauksilla.
 
 Julkisella testiosoitteella tehty oikea v2-ostoanalyysin uusintapyyntö hylättiin simulaatiotarjouksen tuottoeron perusteella ennen RPC-simulaatiota. Onnistuva allekirjoittamaton simulaatio todennettiin mallivastauksella. 35 JavaScript-testiä ja kaikki viisi Chromium-ajoa läpäisivät, mukaan lukien Sniperin Paper-ostot ja riskimyynnit.
+
+## Momentum, agentit ja Trojan V2 -jono
+
+Trojan V2:n rinnakkaismalli on sovitettu enintään 24 aktiivisen analyysierän kattoon. Erät jakavat yhden ajastimen ja moduulityöntekijän. Hidas turvallisuus- tai reittipyyntö ei pidä hintadatan työntekijää varattuna. Positiot haetaan erillisellä kierrolla. Sniper analysoi PumpPortal-havainnot, kun taas löydöt pysyvät kaikkien lähteiden listassa. Strateginen odotus säilyy uudelleenanalyysissä 10 sekuntina. Uusi turvallisuustieto voi aikaistaa käsittelyä. Yhden poolin noteerauksen aikaleimaa ei siirretä välimuistiosumassa.
+
+Aggressive Momentum lisää Paper-moottoriin säädettävän pistetason, dynaamisen koon, Jupiter-myyntireitin varmennuksen, likviditeetin heikkenemiseen reagoivan poistumisen ja toteumiin linkitetyn päätös- ja markkinahistorian. Se käyttää olemassa olevia WebAssembly-indikaattoreita moniaikavälivahvistuksessa. Se käyttää olemassa olevaa mallinnettua Paper-toteutuskirjaa eikä tarvitse muuta palvelinta.
+
+Ajomoottori ei asenna alkuperäisen natiivisovelluksen tai Trojan V2:n koko prosessiympäristöä. Selainversiossa ovat edelleen rajalliset protokollakohtaiset reitit, lähdekiintiöt, iOS:n taustarajat ja Live-toteutusadapterin puuttuminen. Reittitarjous ja simuloitu kauppa eivät todista Mainnet-toteutuskelpoisuutta. Tarkat kokeet ja iPhone-asennus ovat [README:ssä](README.md).

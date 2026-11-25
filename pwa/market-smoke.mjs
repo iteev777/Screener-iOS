@@ -3,6 +3,7 @@ import { chromium } from "playwright";
 import { publicKeyBytes } from "./wallet-standard.js";
 
 const base = process.env.SCREENER_PWA_URL ?? "http://127.0.0.1:8018/";
+const view = (page, pageName) => page.locator(`#dashboard-nav [data-view="${pageName}"]`).click();
 const browser = await chromium.launch({ executablePath: process.env.SCREENER_CHROMIUM });
 const mint = "So11111111111111111111111111111111111111112";
 const pool = "11111111111111111111111111111111";
@@ -74,41 +75,47 @@ try {
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.goto(base);
-  await page.getByText("Markkinahaku ja OHLCV").click();
+  await view(page, "tokens");
   await page.locator('[name="query"]').fill("WSOL");
   await page.getByRole("button", { name: "Hae Solana-markkinoita" }).click();
   await page.getByRole("button", { name: /WSOL ·/ }).click();
+  await view(page, "home");
   await page.getByRole("heading", { name: "WSOL / USD" }).waitFor();
+  await view(page, "tokens");
   await page.locator("#load-candles").click();
   await page.locator("#candle-status").getByText("2 kynttilää.").waitFor();
-  await page.locator("summary").getByText("Oma ehtopuu", { exact: true }).click();
+  await view(page, "settings");
   await page.locator("#rule-json").fill(JSON.stringify({
     entry: { metric: "price", compare: "gt", value: { metric: "sma", period: 2 } },
     exit: { metric: "price", compare: "lt", value: 90 }
   }));
   await page.getByRole("button", { name: "Tallenna ehtopuut" }).click();
   await page.locator("#status").getByText("Ehtopuut tallennettu.").waitFor();
-  await page.getByText("Strategia ja riskirajat").click();
+  await view(page, "settings");
   await page.locator('[name="strategy"]').selectOption("3");
   await page.getByRole("button", { name: "Tallenna asetukset" }).click();
   await page.locator("#status").getByText("Asetukset tallennettu.").waitFor();
   await page.locator("#live").click();
+  await view(page, "positions");
   await page.locator("#trades").getByText(/Osto/).waitFor();
+  await view(page, "home");
   await page.locator("#position").getByText(/Avoin positio.*WSOL/).waitFor();
-  await page.getByText("Avoimet paperipositiot").click();
+  await view(page, "positions");
   await page.locator("#open-positions").getByText(/WSOL/).waitFor();
   await page.locator("#stop").click();
   await page.reload();
+  await view(page, "home");
   await page.getByRole("heading", { name: "WSOL / USD" }).waitFor();
+  await view(page, "positions");
   await page.locator("#trades").getByText(/Osto/).waitFor();
   assert.equal(await page.locator('[name="strategy"]').inputValue(), "3");
-  await page.getByText("Botin toimintaloki").click();
+  await view(page, "monitoring");
   await page.locator("#activity").getByText(/Osto/).waitFor();
-  await page.getByText("Strategia ja riskirajat").click();
+  await view(page, "settings");
   await page.locator('[name="strategy"]').selectOption("4");
   await page.getByRole("button", { name: "Tallenna asetukset" }).click();
   await page.locator("#status").getByText("Asetukset tallennettu.").waitFor();
-  await page.locator("summary").getByText("Copy Trading", { exact: true }).click();
+  await view(page, "trader");
   await page.locator("#copy-wallet").fill(owner);
   await page.getByRole("button", { name: "Tallenna lompakko" }).click();
   await page.locator("#status").getByText("Copy Trading -lompakko tallennettu.").waitFor();
@@ -118,12 +125,15 @@ try {
   assert.equal(await page.locator("#trades li").count(), 1);
   recent = true;
   await page.clock.runFor(30001);
+  await view(page, "positions");
   await page.locator("#trades").getByText(/Myynti/).waitFor();
   await page.locator("#stop").click();
 
   await page.locator("#mode").selectOption("live");
   await page.locator("#connect").click();
+  await view(page, "home");
   await page.locator("#balance").getByText(/2 SOL/).waitFor();
+  await view(page, "trader");
   await page.locator("#sync-swaps").click();
   await page.locator("#settlements").getByText(/Myynti.*new/).waitFor();
   await page.locator('[name="value"]').fill("1");
@@ -133,7 +143,7 @@ try {
   assert.equal(await page.locator('[name="apiKey"]').inputValue(), "");
   await page.getByRole("button", { name: "Muodosta ja simuloi swap" }).click();
   await page.locator("#quote-result").getByText(/InvalidAccountForFee/).waitFor();
-  assert.equal(await page.locator("#live").isDisabled(), true);
+  await page.waitForFunction(() => document.getElementById("live").disabled);
   assert.ok(rpcMethods.includes("getTransaction"));
   assert.ok(rpcMethods.includes("simulateTransaction"));
   assert.ok(!rpcMethods.includes("sendTransaction"));

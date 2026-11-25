@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chromium } from "playwright";
 
 const base = process.env.SCREENER_PWA_URL ?? "http://127.0.0.1:8018/";
+const view = (page, pageName) => page.locator(`#dashboard-nav [data-view="${pageName}"]`).click();
 const browser = await chromium.launch({ executablePath: process.env.SCREENER_CHROMIUM });
 const marketUrl = "https://api.dexscreener.com/token-pairs/v1/solana/So11111111111111111111111111111111111111112";
 const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
@@ -58,11 +59,11 @@ try {
   console.log("Chromium WASM, 100,000 RSI calculations:", perf.ms.toFixed(2), "ms");
 
   await select("live");
-  assert.equal(await page.locator("#live").isDisabled(), true);
+  await page.waitForFunction(() => document.getElementById("live").disabled);
   assert.equal(await page.locator("#trades li").count(), 0);
   await select("paper");
   await page.locator("#balance").getByText(/1\s000/).waitFor();
-  await page.getByText("Strategia ja riskirajat").click();
+  await view(page, "settings");
   await page.locator('[name="exposureUsd"]').fill("250");
   await page.getByRole("button", { name: "Tallenna asetukset" }).click();
   await status.getByText("Asetukset tallennettu.").waitFor();
