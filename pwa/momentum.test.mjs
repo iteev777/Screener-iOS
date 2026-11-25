@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { rankCandidates } from "./candidate-analyst.js";
-import { momentumEntry, momentumExit, momentumSize } from "./momentum.js";
+import { momentumEntry, momentumExit, momentumSize, shortMomentum, momentumSignal, momentumCalibration } from "./momentum.js";
 import { defaults } from "./policy.js";
 import { advancePortfolio, newPortfolio } from "./scanner.js";
 
@@ -39,9 +39,9 @@ test("position size respects signal, cash, order, and liquidity caps", () => {
   assert.equal(momentumSize(1000, 79, 100000, policy), 0);
 });
 
-test("strong momentum holds past take-profit, and weakness or trailing can exit", () => {
+test("rapid momentum takes partial profit and preserves trailing and liquidity exits", () => {
   const book = { cost: 100, sol: 100, peak: 1.2, entryLiquidity: 100000, openedAt: now };
-  assert.equal(momentumExit(book, tick(1.5, now + 1000), policy), undefined);
+  assert.equal(momentumExit(book, tick(1.5, now + 1000), policy).sol, 50);
   assert.equal(momentumExit(book, tick(1.2, now + 1000, { transactions: { m5: { buys: 2, sells: 8 } } }), policy).sol, 50);
   assert.equal(momentumExit(book, tick(1.1, now + 1000), policy).reason, 3);
   assert.equal(momentumExit(book, tick(1.18, now + 1000, { liquidity: 40000 }), policy).reason, 8);
@@ -179,4 +179,22 @@ test("a partial profit releases cash and charges estimated costs before the rema
   assert.equal(book.decisions[0].state, "EXIT");
   assert.equal(book.positions["A:P"], undefined);
   assert.ok(book.cash > policy.paperCapital);
+});
+
+test("short windows require timestamped trades and reject missing observations",()=>{
+  assert.equal(momentumSignal(shortMomentum([],now),95).decision,"watch");
+  const rows=Array.from({length:60},(_,i)=>({at:now-(59-i)*1000,price:1+i*.003,usd:i>44?400:50,side:"buy"}));
+  const w=shortMomentum(rows,now);
+  assert.equal(w[5].count,5);
+  assert.equal(w[60].count,60);
+  assert.equal(momentumSignal(w,95).decision,"approve");
+});
+test("calibration requires completed positions and never lowers baseline",()=>{
+  const rows=[];
+  for(let i=0;i<30;i++){
+    rows.unshift({strategy:8,token:String(i),pool:"P",side:"Osto",notional:10,score:85});
+    rows.unshift({strategy:8,token:String(i),pool:"P",side:"Myynti",realizedPnl:-1,closed:true});
+  }
+  assert.equal(momentumCalibration(rows,80).threshold,84);
+  assert.equal(momentumCalibration(rows.slice(0,10),80).threshold,80);
 });
