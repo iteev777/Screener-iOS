@@ -64,3 +64,9 @@ filter = 'test(/realdata/)'
 test-group = 'serial-realdata'
 slow-timeout = { period = "60s", terminate-after = 15 }
 retries = 0
+
+# These tests compare short wall-clock samples. Reserve the runner's test slots
+# so unrelated Rust test processes cannot distort one input size's measurement.
+[[profile.default.overrides]]
+filter = 'test(/filtering_perf::/)'
+threads-required = "num-test-threads"
