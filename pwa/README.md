@@ -158,3 +158,5 @@ Jokainen ostettava token tarvitsee edelleen tuoreen hinnan, riskirajan täyttäv
 SCREENER_BENCH_SECONDS=3605 SCREENER_BENCH_LEARNING=/tmp/paper-learning.json \
   node --use-env-proxy pwa/paper-benchmark.mjs > /tmp/paper-momentum-adaptive.jsonl
 ```
+
+Jupiter v2:n hintavaikutus voi olla etumerkillinen. Sovellus muuntaa `priceImpactPct`-suhdeluvun prosenttiyksiköiksi ja tarkistaa itseisarvon. `priceImpact`-varakenttä on jo prosenttiyksiköissä. Oston ja vastakkaisen myyntireitin tarkistukset, kolmen prosentin reittikohtainen enimmäisvaikutus ja viiden prosentin edestakainen enimmäisvaikutus säilyvät.

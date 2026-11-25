@@ -8,17 +8,21 @@ const integer = value => /^\d{1,20}$/.test(String(value ?? "")) && BigInt(value)
   ? BigInt(value) : null;
 
 export function routeQuality(quote) {
-  const raw = quote?.priceImpactPct ?? quote?.priceImpact;
+  const fraction = quote?.priceImpactPct;
+  const raw = fraction ?? quote?.priceImpact;
   const normalized = Number(raw);
   const fee = Number(quote?.feeBps ?? 0);
   const route = quote?.routePlan;
-  if (raw == null || raw === "" || !Number.isFinite(normalized) || normalized < 0 ||
+  if (raw == null || raw === "" || !Number.isFinite(normalized) ||
       !Number.isFinite(fee) || fee < 0 || !Array.isArray(route) || !route.length ||
       route.some(step => !step?.swapInfo || (step.percent != null &&
         (!Number.isFinite(Number(step.percent)) || Number(step.percent) < 0 || Number(step.percent) > 100)))) {
     return { allowed: false, score: 0, reason: "Jupiter-reittidata puuttuu tai on virheellinen" };
   }
-  const impact = normalized <= 1 ? normalized * 100 : normalized;
+  // Jupiter Swap v2 reports signed impact. Its string priceImpactPct is a
+  // fraction and the numeric priceImpact fallback is in percentage points.
+  // Bound the magnitude in either direction before accepting an order.
+  const impact = Math.abs(normalized) * (fraction == null ? 1 : 100);
   const split = route.some(step => step.percent != null && Number(step.percent) < 100);
   const score = Math.round((100 - Math.min(55, impact * 15) - Math.min(20, route.length * 4) -
     Math.min(15, fee * .5) - (split ? 2 : 0)) * 100) / 100;

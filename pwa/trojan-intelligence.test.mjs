@@ -70,3 +70,13 @@ test("Jupiter v2 checks amounts, route quality, impact and simulation drift with
   assert.equal((await analyzeEntryRoute(token, 5, { solUsd: 100, taker: pool })).allowed, false);
   assert.deepEqual(methods, ["simulateTransaction"]);
 });
+
+test("Jupiter v2 signed impact keeps the same risk cap in both quote formats", () => {
+  const routePlan = [{ swapInfo: {}, percent: 100, bps: 10000 }];
+  assert.equal(routeQuality({ priceImpactPct:"-0.00025", priceImpact:-.025, routePlan }).allowed,true);
+  assert.equal(routeQuality({ priceImpactPct:"-0.00025", routePlan }).impact,.025);
+  assert.equal(routeQuality({ priceImpact:-.025, routePlan }).impact,.025);
+  assert.equal(routeQuality({ priceImpactPct:"-0.04", routePlan }).allowed,false);
+  assert.equal(routeQuality({ priceImpact:-4, routePlan }).allowed,false);
+  assert.equal(routeQuality({ priceImpactPct:"-0.001", routePlan:[] }).allowed,false);
+});
