@@ -79,21 +79,21 @@ export function momentumExit(book, tick, policy) {
     (finite(acceleration) && acceleration < .65);
   const confirmed = buying >= .58 && acceleration >= 1 && short > 0 && hour >= 0;
   // Volatility can keep the configured distance or tighten it, within the approved cap.
-  const distance = momentumTrailingDistance(short, policy);
+  const distance = momentumTrailingDistance(short, { ...policy, momentumTrailing: Math.min(policy.momentumTrailing, 4) });
   const exit = (reason, detail, fraction = 1) => ({ side: "Myynti", sol: book.sol * fraction, reason, detail });
   if (finite(tick.liquidity) && finite(book.entryLiquidity) && book.entryLiquidity > 0 &&
       tick.liquidity <= book.entryLiquidity * (1 - policy.momentumLiquidityDrop / 100))
     return exit(8, "Likviditeetti romahti suhteessa ostoon");
-  if (move <= -policy.stop) return exit(1, "Kiinteä tappioraja");
+  if (move <= -(policy.momentumStop ?? 5)) return exit(1, "Kiinteä tappioraja");
   if (policy.breakEven > 0 && peakMove >= policy.breakEven && move <= 0)
     return exit(2, "Break-even-suoja");
   if ((1 - tick.price / peak) * 100 >= distance) return exit(3, "Volatiliteettiin mukautettu trailing stop");
-  if (at >= policy.holdMinutes * 60000) return exit(4, "Enimmäispitoaika");
+  if (at >= (policy.momentumHoldMinutes ?? 5) * 60000) return exit(4, "Enimmäispitoaika");
   const partial = policy.momentumProfitShare ?? 50;
   const costFloor = (policy.feeBps + policy.slippageBps) / 100;
-  if (weak && move >= Math.max(policy.profit, costFloor + 1) && !book.profitTaken)
-    return exit(5, "Momentum heikkeni voitollisessa positiossa", partial / 100);
-  if (book.profitTaken && weak && move >= policy.finalProfit)
+  if (move >= Math.max(policy.momentumProfit ?? 8, costFloor + 1) && !book.profitTaken)
+    return exit(5, "Ensimmäinen Momentum-voittotavoite", partial / 100);
+  if (book.profitTaken && move >= (policy.momentumFinalProfit ?? 15))
     return exit(5, "Jäljellä olevan osuuden voitto kotiutettu");
   if (weak && finite(short) && short < 0 && finite(buying) && buying < .45 && !confirmed)
     return exit(9, "Negatiivinen momentum ja kasvava myyntipaine");
