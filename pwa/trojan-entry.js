@@ -59,12 +59,12 @@ export async function analyzeEntryRoute(token, usd, { signal, apiKey, taker, sli
     if (reverse.quote.transaction || !routeQuality(reverse.quote).allowed) {
       return { ...quality, allowed: false, reason: "Jupiterin myyntireitti hylättiin" };
     }
-    const roundTripBps = Number((BigInt(amount) - reverse.out) * 10000n / BigInt(amount));
-    if (roundTripBps > 500) {
+    const loss = (BigInt(amount) - reverse.out) * 10000n;
+    if (loss > BigInt(amount) * 500n) {
       return { ...quality, allowed: false, reason: "Jupiterin osto- ja myyntireitin kokonaisvaikutus yli 5 %" };
     }
     quality.reason += " · Myyntireitti tarkistettu";
-    quality.roundTripBps = roundTripBps;
+    quality.roundTripBps = Number(loss / BigInt(amount));
   }
   if (!taker) return { ...quality, simulation: "skipped" };
   const { quote: simulatedQuote, out: simulatedOut } = await request({ taker });

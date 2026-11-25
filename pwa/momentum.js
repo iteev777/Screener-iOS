@@ -142,6 +142,8 @@ export function earlyMomentum(windows, market, quality, threshold, policy, previ
   const watch = (code, reason, score) => ({decision:"watch", code, reason, score, track:"early"});
   if (!recent || !context || recent.spanMs < 3000 || context.spanMs < 5000)
     return watch("short-data", "Lyhyen aikavälin todennettu kauppavirta puuttuu");
+  if (market.change5 > 20 || market.changeHour < -25 || market.changeHour > 75)
+    return watch("extended", "Pidemmän ikkunan hintaliike ylittää riskirajan");
   if (!(market.liquidity >= policy.minLiquidity) || !Number.isFinite(quality))
     return watch("short-liquidity", "Poolin likviditeettitieto tai strategian laatu puuttuu");
   if (Number.isFinite(previousLiquidity) && market.liquidity < previousLiquidity * .9)

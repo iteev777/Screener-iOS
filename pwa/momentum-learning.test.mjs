@@ -38,6 +38,7 @@ test("young-pool signal needs only timestamped short-window tape and rejects fal
   const tape = shortMomentum(rows,now);
   assert.equal(tape[60].count,5);
   assert.equal(earlyMomentum(tape,market,75,80,defaults,10000).decision,"approve");
+  assert.equal(earlyMomentum(tape,{...market,changeHour:-26},75,80,defaults,10000).code,"extended");
   assert.equal(earlyMomentum(tape,market,75,80,defaults,15000).code,"short-depth-drop");
   assert.equal(earlyMomentum(shortMomentum(rows.slice(-2),now),market,90,80,defaults).decision,"watch");
 });
