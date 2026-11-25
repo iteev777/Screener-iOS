@@ -1080,7 +1080,34 @@ try {
   refreshFeed();
   renderScan(await stored(scanKey) ?? newPortfolio(settings.paperCapital));
   setInterval(() => void refreshIdlePaper(), 3000);
-  navigator.serviceWorker?.register("./sw.js").catch(error => console.warn(error));
+  navigator.serviceWorker?.register("./sw.js", {updateViaCache:"none"}).then(reg => {
+    let offered = false;
+    const offer = () => {
+      if (!reg.waiting || !navigator.serviceWorker.controller || offered) return;
+      offered = true;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "Uusi versio – päivitä";
+      document.querySelector(".app-header").append(button);
+      button.onclick = () => {
+        if (run || byId("mode").value === "live") {
+          alert("Pysäytä kaupankäynti ja vaihda Paper Trading -tilaan ennen päivitystä.");
+          return;
+        }
+        const worker = reg.waiting;
+        if (!worker) { location.reload(); return; }
+        worker.addEventListener("statechange", () => { if (worker.state === "activated") location.reload(); });
+        worker.postMessage({type:"ACTIVATE_UPDATE"});
+      };
+    };
+    reg.addEventListener("updatefound", () => {
+      reg.installing?.addEventListener("statechange", offer);
+    });
+    offer();
+    const check = () => { if (!document.hidden) reg.update().then(offer).catch(()=>{}); };
+    document.addEventListener("visibilitychange", check);
+    check();
+  }).catch(error => console.warn(error));
 } catch (error) {
   byId("status").textContent = `Käynnistys epäonnistui. ${error.message}`;
 }
