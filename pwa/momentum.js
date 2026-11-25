@@ -129,3 +129,24 @@ export function momentumSignal(w, quality, threshold=80) {
   const signal=breakout?"breakout":pullback?"pullback":early?"early":null;
   return {decision:signal && score>=threshold?"approve":"watch",code:signal??"weak-momentum",score};
 }
+
+// Conservative calibration from completed paper positions, never from open marks.
+export function momentumCalibration(trades, baseline=80) {
+  const groups=new Map(), completed=[];
+  for(const t of [...trades].reverse()){
+    if(t.strategy!==8 || !t.token || !t.pool) continue;
+    const key=t.token+":"+t.pool;
+    if(t.side==="Osto") groups.set(key,{pnl:0,cost:t.notional,score:t.score});
+    else if(t.side==="Myynti" && groups.has(key)){
+      const g=groups.get(key);
+      if(!finite(t.realizedPnl)){groups.delete(key);continue;}
+      g.pnl+=t.realizedPnl;
+      if(t.closed){if(g.cost>0 && finite(g.score)) completed.push(g);groups.delete(key);}
+    }
+  }
+  const sample=completed.slice(-60);
+  if(sample.length<30) return {threshold:baseline,samples:sample.length};
+  const mean=sample.reduce((n,t)=>n+t.pnl/t.cost,0)/sample.length;
+  // Only tighten automatically; lowering requires independent validation.
+  return {threshold:clamp(baseline+(mean<0?4:0),baseline,100),samples:sample.length,mean};
+}
