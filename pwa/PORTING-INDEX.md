@@ -286,3 +286,7 @@ Tämä inventaario kattaa listatut alkuperäiset kaupankäynti-, suodatus-, stra
 | [jupiter.rs](../src/chains/solana/swaps/routers/jupiter.rs) | Jupiter Router Implementation | Tarjous, allekirjoittamaton legacy-paketti ja RPC-simulaatio [jupiter.js](jupiter.js). Allekirjoitus ja lähetys avoinna. |
 | [mod.rs](../src/chains/solana/swaps/routers/mod.rs) | Solana implementations of `crate::swaps::SwapRouter`. | Alkuperäinen swap-polku siirtämättä. |
 | [raptor.rs](../src/chains/solana/swaps/routers/raptor.rs) | Raptor Router Implementation | Alkuperäinen swap-polku siirtämättä. |
+
+### Momentum-päivityksen viitteet
+
+Paikallinen monen poolin toteumakirja, salkun arvokäyrä, tokenin ajonaikaiset päätökset ja suoja samasta tokenista liian nopeasti toistuville ostoille ovat [skannerissa](scanner.js) ja [dashboardissa](agent-dashboard.js). [Momentum](momentum.js) lisää uuden Paper-strategian olemassa olevien profiilien rinnalle. [Työntekijä](analyst-worker.js) suorittaa [Trojanin ja Momentumin pisteytyksen](candidate-analyst.js). [Ensimmäisten 15 minuutin koejärjestely ja tulokset](README.md) kuvaavat, mikä osa läpäisi oikean datan testin. Natiivin Live-toteutuksen ja protokollien osalta yllä olevat avoimet kohdat ovat edelleen voimassa.

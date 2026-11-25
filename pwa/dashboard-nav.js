@@ -9,6 +9,9 @@ function show(view) {
 }
 nav.addEventListener("click", event => {
   const button = event.target.closest("button[data-view]");
-  if (button) show(button.dataset.view);
+  if (button) {
+    show(button.dataset.view);
+    window.scrollTo(0, 0);
+  }
 });
 show("home");

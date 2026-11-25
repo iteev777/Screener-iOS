@@ -28,6 +28,7 @@ export function equityDashboard(portfolio, equity) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   const points = portfolio.history ?? [];
+  canvas.hidden = !points.length;
   const key = points.at(-1)?.at ?? "empty";
   if (canvas.dataset.asOf === String(key)) return;
   canvas.dataset.asOf = key;

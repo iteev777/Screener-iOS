@@ -33,7 +33,23 @@
 </div>
 <p id="status" role="status">Ladataan WebAssembly-moottoria…</p>
 </section>
-<section data-page="home"><h2>Paper Trading · Portfolio</h2><div class="metric-grid"><div><p>Salkun arvo</p><strong id="home-equity">—</strong><p id="home-return">—</p><canvas id="equity-chart" width="640" height="140" aria-label="Tallennettu Paper-salkun arvo"></canvas></div><div><p>Käteinen</p><strong id="home-cash">—</strong></div><div><p>Toteutunut P/L</p><strong id="home-pnl">—</strong></div><div><p>Avoimet positiot</p><strong id="home-count">—</strong></div><div><p>Sijoitettu pääoma</p><strong id="home-invested">—</strong></div><div><p>Realisoimaton P/L</p><strong id="home-unrealized">—</strong></div><div><p>Voitolliset myynnit</p><strong id="home-win-rate">—</strong></div></div></section><div class="overview" data-page="home">
+<section class="portfolio-hero" data-page="home">
+  <h2>Paper Trading · salkku</h2>
+  <strong id="home-equity">—</strong>
+  <p id="home-return">—</p>
+  <canvas id="equity-chart" width="640" height="140" aria-label="Tallennettu Paper-salkun arvo" hidden></canvas>
+</section>
+<section id="home-metrics" data-page="home" aria-label="Paper-salkun tilastot">
+  <div class="metric-grid">
+    <div><p>Käteinen</p><strong id="home-cash">—</strong></div>
+    <div><p>Toteutunut P/L</p><strong id="home-pnl">—</strong></div>
+    <div><p>Avoimet positiot</p><strong id="home-count">—</strong></div>
+    <div><p>Sijoitettu pääoma</p><strong id="home-invested">—</strong></div>
+    <div><p>Realisoimaton P/L</p><strong id="home-unrealized">—</strong></div>
+    <div><p>Voitolliset myynnit</p><strong id="home-win-rate">—</strong></div>
+  </div>
+</section>
+<div class="overview" data-page="home">
 <section aria-label="Markkina"><h2 id="market-title">SOL / USD</h2><strong id="price">—</strong><p id="source">Valitse hintalähde.</p><p>Solana WebSocket · slot <span id="slot">—</span></p></section>
 <section aria-label="Salkku"><h2 id="book-title">Paperisalkku</h2><strong id="equity">—</strong><p id="balance"></p><p id="position"></p></section>
 </div>
