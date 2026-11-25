@@ -82,11 +82,28 @@ function decisionLabel(row) {
   return ({ found: "Löydetty", approve: "Ostosignaali", watch: "WATCH", reject: "REJECT" })[row.status] ?? row.status;
 }
 
+const logoCache = new Map();
+function tokenLogo(mint) {
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint || "")) return Promise.resolve(null);
+  if (!logoCache.has(mint)) {
+    if (logoCache.size >= 500) logoCache.delete(logoCache.keys().next().value);
+    logoCache.set(mint, fetch("https://api.dexscreener.com/token-pairs/v1/solana/" + encodeURIComponent(mint), {signal:AbortSignal.timeout(8000)})
+      .then(r => r.ok ? r.json() : null)
+      .then(rows => {
+        const pair = Array.isArray(rows) && rows.filter(p => p.baseToken?.address === mint && p.info?.imageUrl).sort((a,b)=>(b.liquidity?.usd||0)-(a.liquidity?.usd||0))[0];
+        if (!pair) return null;
+        const url = new URL(pair.info.imageUrl);
+        return url.protocol === "https:" && url.hostname === "cdn.dexscreener.com" ? url.href : null;
+      }).catch(()=>null));
+  }
+  return logoCache.get(mint);
+}
 export function tokenBadge(symbol, mint) {
   const badge = document.createElement("span");
   badge.className = "token-badge";
   badge.setAttribute("aria-hidden", "true");
-  badge.textContent = (symbol || mint).slice(0, 2).toUpperCase();
+  badge.textContent = (symbol || mint || "?").slice(0, 2).toUpperCase();
+  tokenLogo(mint).then(url => { if (!url) return; const img = document.createElement("img"); img.alt = ""; img.loading = "lazy"; img.referrerPolicy = "no-referrer"; img.onerror = () => img.remove(); img.src = url; badge.append(img); });
   return badge;
 }
 
