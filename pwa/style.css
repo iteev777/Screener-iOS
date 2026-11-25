@@ -48,3 +48,29 @@ label{display:block;margin:12px 0 5px;color:#d4d4d8;font-size:13px}select,input:
 #scan{background:#57e5ad;color:#10231b}
 #dashboard-nav button[aria-pressed=true]{background:#19322a;color:#8ef1ca}
 #token-chart{background:#0b1015}
+
+/* OLED mobile dashboard */
+:root{background:#000;color:#fff;--panel:#171717;--line:#292929;--muted:#aaa;--accent:#fff}
+body{background:#000} .app-header h1 span{color:#fff}
+.portfolio-hero{background:#000;border:0;padding:12px 4px 8px}
+.portfolio-hero strong{color:#fff;font-size:clamp(40px,12vw,58px)}
+.portfolio-hero h2{color:#aaa}.equity-range{border-color:#252525}
+.equity-range button{color:#aaa}.equity-range button[aria-pressed=true]{background:#252525;color:#fff}
+.home-panel{background:#000;border:0;padding:8px 4px}.section-heading h2{color:#fff;font-size:18px}
+#home-agents{grid-auto-flow:column;grid-auto-columns:minmax(76px,calc((100% - 24px)/4));gap:8px}
+#home-agents article{background:#171717;border:0;text-align:center;padding:12px 4px;min-width:0}
+#home-agents article::before{content:"";display:block;width:30px;height:30px;border-radius:50%;background:#3489ff;margin:0 auto 10px}
+#home-agents article:nth-child(2)::before{background:#ff528a}
+#home-agents article:nth-child(3)::before{background:#9b70ff}
+#home-agents article:nth-child(4)::before{background:#ffb52b}
+#home-agents article:nth-child(5)::before{background:#51d895}
+#home-agents h3{color:#fff;letter-spacing:0;font-size:10px;margin:0}
+#home-agents article p{display:none}
+#home-agents article.agent-active{box-shadow:inset 0 0 0 1px #777}
+#dashboard-nav{background:#000}#dashboard-nav button[aria-pressed=true]{background:#222;color:#fff}
+button,#scan{background:#fff;color:#000}button.secondary{background:#222;color:#fff}
+.metric-grid>div,#scan-positions li,#token-chart,canvas,select,input:not([type=hidden]),textarea{background:#111}
+.positive{color:#51d895}.negative{color:#ff5252}
+.token-badge{width:38px;height:38px;background:#242424;color:#fff;overflow:hidden;position:relative;flex-shrink:0}
+.token-badge img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%}
+.home-feed li p{padding-inline-start:45px}
