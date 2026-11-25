@@ -79,10 +79,10 @@ const marketCaches=new WeakMap();
 export function marketEvidence(token, signal) {
   return marketCaches.get(signal)?.get(token);
 }
-export function invalidateMarket(token, signal, at) {
+export function invalidateMarket(token, signal, at, refreshed = false) {
   const cache = marketCaches.get(signal);
   const entry = cache?.get(token);
-  if (entry && at - entry.at >= 3000) cache.delete(token);
+  if (entry && (refreshed || at-entry.at>=3000)) cache.delete(token);
 }
 export async function marketBatch(tokens, signal) {
   if (!tokens.length || tokens.length > 30 || tokens.some(token => typeof token !== "string" || !address.test(token))) {

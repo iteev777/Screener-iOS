@@ -321,9 +321,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   let nextShadowSafety = 0;
   let calibration = learning?.calibration(policy.momentumScore, Date.now());
   const depthHistory = new Map();
+  const lastReprice=new Map();
   const threshold = track => calibration?.tracks[track].threshold ?? policy.momentumScore;
   const watched = new Map();
   const heldPools = new Set();
+  const heldTokens = new Set();
   let poolEventAt = 0;
   let streamWake;
   let approvalVersion = 0;
@@ -678,7 +680,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           const weakFlow = rolling.code === "buy-pressure" && Number.isFinite(market.transactions?.m5?.buys) &&
             market.transactions.m5.buys < market.transactions.m5.sells;
           const calibrated = options.filter(pick => pick.decision === "approve" && (pick.track === "rolling" || !weakFlow))
-            .sort((a,b) => (b.score - b.scoreFloor) - (a.score - a.scoreFloor))[0];
+            .sort((a,b)=>b.expectedPct-a.expectedPct || (b.score-b.scoreFloor)-(a.score-a.scoreFloor))[0];
           row.strategy = calibrated ?? rolling;
           row.decision = row.strategy.decision ?? row.decision;
           const observation = calibrated ?? options.find(pick => pick.code === "score" && Number.isFinite(pick.score)) ??
@@ -721,12 +723,12 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           row.strategy = { ...row.strategy, code: "liquidity-floor", reason: "Poolin likviditeetti alittaa riskirajan" };
         }
       }
-      const possible = ranked.filter(row => row.decision === "approve").sort((a,b)=>((b.strategy?.score??0)+(b.profile==="sniper"?12:0))-((a.strategy?.score??0)+(a.profile==="sniper"?12:0)));
+      const possible = ranked.filter(row => row.decision === "approve" && (!momentum || !heldTokens.has(row.item.token))).sort((a,b)=>((b.strategy?.score??0)+(b.profile==="sniper"?12:0))-((a.strategy?.score??0)+(a.profile==="sniper"?12:0)));
       if (shadowCandidate) nextShadowSafety = now + 20000;
       const verificationCandidates = shadowCandidate && !possible.includes(shadowCandidate)
         ? [...possible, shadowCandidate] : possible;
       for(const [key,value] of poolCache)if(value.expires<=Date.now())poolCache.delete(key);
-      const routeCandidates = virtualCandidate && !possible.includes(virtualCandidate) ? [...possible,virtualCandidate] : possible;
+      const routeCandidates = virtualCandidate && !heldTokens.has(virtualCandidate.item.token) && !possible.includes(virtualCandidate) ? [...possible,virtualCandidate] : possible;
       const poolJobs=policy.strategy>=5?routeCandidates.filter(({pair, item})=>
         mintCache.get(item.token)?.ok !== false && rugCache.get(item.token)?.ok !== false &&
         !poolCache.has(positionKey(pair.market))&&!poolPending.has(positionKey(pair.market))).slice(0,Math.max(0,2-poolActive)):[];
@@ -775,7 +777,10 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
       }
       if (signal.aborted) return;
       if (policy.strategy >= 5 && routeActive < routeLimit && Date.now() >= nextJupiter) {
-        const next = routeCandidates.find(({ item, pair, decision }) => {
+        const ready = ({item,pair}) => mintCache.get(item.token)?.ok===true && rugCache.get(item.token)?.ok===true &&
+          poolCache.get(positionKey(pair.market))?.status==="approve";
+        const ordered=momentum ? [...routeCandidates].sort((a,b)=>Number(ready(b))-Number(ready(a))) : routeCandidates;
+        const next = ordered.find(({ item, pair, decision }) => {
           const key=positionKey(pair.market), pool=poolCache.get(key);
           const mint=mintCache.get(item.token)?.ok, rug=rugCache.get(item.token)?.ok;
           return !routeCache.has(key) && !routePending.has(key) && (momentum
@@ -1047,7 +1052,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         const held = Object.values(portfolio.positions).map(position => position.market);
         for (const key of sellQuotes.keys()) if (!Object.hasOwn(portfolio.positions,key)) sellQuotes.delete(key);
         heldPools.clear();
-        for (const market of held) heldPools.add(market.pool);
+        heldTokens.clear();
+        for (const market of held) {
+          heldPools.add(market.pool);
+          heldTokens.add(market.token);
+        }
         if (momentum) refreshStreams();
         for(const [key,value] of sellPoolCache)if(value.expires<=Date.now())sellPoolCache.delete(key);
         for(const market of held.filter(m=>m.quoteToken&&!sellPoolCache.has(positionKey(m))&&!sellPoolPending.has(positionKey(m))).slice(0,Math.max(0,2-sellPoolPending.size))){
@@ -1055,6 +1064,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           void verifyPoolReserves(market,signal).then(pool=>{if(!signal.aborted)sellPoolCache.set(key,{...pool,expires:Date.now()+8000});}).catch(()=>{if(!signal.aborted)sellPoolCache.set(key,{expires:Date.now()+10000});}).finally(()=>sellPoolPending.delete(key));
         }
         const now = Date.now();
+        for (const [key,at] of lastReprice) if (now-at>maxTickAge) lastReprice.delete(key);
         const candidates = approvedTicks.filter(tick => now >= tick.at && now - tick.at <= maxTickAge &&
           (tick.routeExpires === undefined || now <= tick.routeExpires));
         for (const [key, at] of usedPrices) if (now - at > maxTickAge) usedPrices.delete(key);
@@ -1149,13 +1159,32 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
               const refreshed = await pricesWithFallback(entries);
               const byKey = new Map(refreshed.map(tick => [positionKey(tick), tick]));
               for (const signalTick of entries) {
-                const current = byKey.get(positionKey(signalTick));
-                if (current && !current.dataPool && current.at >= signalTick.signalAt &&
-                    current.price <= signalTick.price * 1.01 && current.price >= signalTick.price * .97 && current.at <= signalTick.routeExpires) {
+                const key=positionKey(signalTick);
+                const current=byKey.get(key);
+                const fresh=current && !current.dataPool && current.at>=signalTick.signalAt;
+                const moved=fresh && (current.price>signalTick.price*1.01 || current.price<signalTick.price*.97);
+                if (fresh && !moved && current.at<=signalTick.routeExpires) {
                   ticks.push({ ...signalTick, ...current });
-                } else diagnostic?.({ token: signalTick.token, stage: "execution", outcome: "watch",
-                  reason: !current || current.at < signalTick.signalAt ? "Tuore toteutushinta puuttuu" : current.at > signalTick.routeExpires
-                    ? "Jupiter-reitti vanheni hintahaun aikana" : "Hinta muuttui liikaa ennen toteutusta" });
+                  continue;
+                }
+                diagnostic?.({token:signalTick.token,stage:"execution",outcome:"watch",
+                  reason:!fresh?"Tuore saman poolin toteutushinta puuttuu":current.at>signalTick.routeExpires
+                    ?"Jupiter-reitti vanheni hintahaun aikana":"Hinta muuttui liikaa ennen toteutusta",
+                  evidence:{signal:signalTick.price,current:current?.price,age:Date.now()-signalTick.signalAt}});
+                if (!moved) continue;
+                const item=queue.sniperItems.get(signalTick.token)??queue.items.get(signalTick.token);
+                const at=Date.now();
+                if (!item || at-(lastReprice.get(key)??0)<5000 ||
+                    routeCache.get(key)?.checkedAt!==signalTick.signalAt) continue;
+                // The old ticket no longer matches market data. Recheck the
+                // strategy and obtain a separate quote for the new price.
+                lastReprice.set(key,at);
+                routeCache.delete(key);
+                approvedTicks=approvedTicks.filter(tick=>positionKey(tick)!==key || tick.signalAt!==signalTick.signalAt);
+                invalidateMarket(signalTick.token,signal,at,true);
+                wake(item,50);
+                diagnostic?.({token:signalTick.token,stage:"execution-reprice",outcome:"watch",
+                  reason:"Muuttunut hinta käynnisti uuden analyysin ja tarjouksen"});
               }
             } catch (error) {
               if (!signal.aborted) sourceError = `Toteutushinta: ${error.message}`;

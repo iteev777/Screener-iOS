@@ -29,6 +29,11 @@ try {
   let dropping = false;
   let fail = false;
   const attemptedSizes=[];
+  const testReprice=momentum && process.env.SCREENER_PRICE_REPRICE==="1";
+  let movedPrice=false;
+  let changedQuotes=0;
+  let returnedOldQuote=false;
+  const mark=token=>testReprice && movedPrice && token===market[0][0]?104:100;
   await page.route("https://api.geckoterminal.com/api/v2/networks/solana/**", route =>
     route.fulfill({ json: { data: (dropping ? [] : market).map(([token, pool]) => ({
       attributes: { address: pool, base_token_price_usd: "100", reserve_in_usd: "100000",
@@ -63,7 +68,7 @@ try {
   await page.route("https://api.dexscreener.com/tokens/v1/solana/**", route =>
     route.fulfill({ json: (dropping ? [] : market).filter(([token]) => route.request().url().includes(token)).map(([token, pool, symbol]) => ({
       chainId: "solana", pairAddress: pool, baseToken: { address: token, symbol }, quoteToken: { address: wsol },
-      priceUsd: "100", liquidity: { usd: 100000 }, volume: { h24: 200000, h6: 200000, h1: 80000, m5: 25000 },
+      priceUsd:String(mark(token)), liquidity: { usd: 100000 }, volume: { h24: 200000, h6: 200000, h1: 80000, m5: 25000 },
       pairCreatedAt: Date.now() - 30 * 60000,
       priceChange: { m5: momentum?7:2, h1: 1, h6: 3, h24: 4 }, txns: { m5: { buys: 90, sells: 10 } }
     })) }));
@@ -71,9 +76,10 @@ try {
     const selected = market.filter(([, pool]) => route.request().url().includes(pool));
     assert.ok(selected.length > 0);
     if (fail) return route.fulfill({ status: 503 });
+    if (testReprice && returnedOldQuote && selected.some(([token])=>token===market[0][0])) movedPrice=true;
     return route.fulfill({ json: { pairs: selected.map(([token, pool, symbol]) => ({
       chainId: "solana", pairAddress: pool, baseToken: { address: token, symbol }, quoteToken: { address: wsol },
-      priceUsd: dropping ? "80" : "100", liquidity: { usd: 100000 }, volume: { h24: 30000 }
+      priceUsd:dropping?"80":String(mark(token)), liquidity: { usd: 100000 }, volume: { h24: 30000 }
     })) } });
   });
   await page.route("https://api.mainnet-beta.solana.com/", route => {
@@ -128,8 +134,12 @@ try {
     const slippage=BigInt(params.get("slippageBps"));
     const resized=momentum && params.get("inputMint")===wsol && params.get("outputMint")===market[0][0];
     if (resized) attemptedSizes.push(amount);
-    const out = params.get("inputMint") === wsol ? amount/1000n
-      : amount*1000n*(dropping?78n:98n)/100n;
+    const buy=params.get("inputMint")===wsol;
+    const target=params.get(buy?"outputMint":"inputMint");
+    const price=BigInt(mark(target));
+    if (resized && movedPrice) changedQuotes++;
+    if (!buy && target===market[0][0] && !movedPrice) returnedOldQuote=true;
+    const out=buy ? amount*100n/(price*1000n) : amount*price*1000n*(dropping?7800n:9800n)/1000000n;
     return route.fulfill({ json: { inputMint: params.get("inputMint"), outputMint: params.get("outputMint"),
       inAmount: params.get("amount"), outAmount: String(out), otherAmountThreshold: String(out*(10000n-slippage)/10000n),
       priceImpactPct: resized && amount>120_000_000n ? ".06" : "0.001",
@@ -154,7 +164,7 @@ try {
   await view(page, "monitoring");
   await page.locator("#agent-cards article").last().waitFor();
   assert.equal(await page.locator("#agent-cards article").count(), 5);
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 24; i++) {
     await page.clock.runFor(3001);
     if (await page.locator("#scan-positions li").count() === 2) break;
   }
@@ -189,6 +199,10 @@ try {
     assert.equal(state.trades.length, 2);
     assert.ok(attemptedSizes.some(size=>size>120_000_000n) && attemptedSizes.some(size=>size<=120_000_000n));
     assert.ok(state.trades.find(row=>row.token===market[0][0]).notional<=12);
+    if (testReprice) {
+      assert.ok(movedPrice && changedQuotes>=1);
+      assert.equal(state.trades.find(row=>row.token===market[0][0]).market.price,104);
+    }
     assert.ok(state.trades.every(trade => trade.strategy === 8 && trade.score >= 80 && trade.feeUsd > 0));
     assert.ok(state.history.length > 0);
     assert.ok(notificationCount > 0);
