@@ -49,6 +49,25 @@ export function marketTape(signal) {
   const cached = new Map();
   let next = 0;
   let active = false;
+  let geckoNext = 0;
+  let geckoBlockedUntil = 0;
+  async function read(path) {
+    while (!signal.aborted && Date.now() < geckoNext && Date.now() >= geckoBlockedUntil) {
+      await new Promise(resolve => setTimeout(resolve, geckoNext - Date.now()));
+    }
+    signal.throwIfAborted();
+    if (Date.now() < geckoBlockedUntil) {
+      const error = new Error("GeckoTerminalin kiintiötauko");
+      error.retryAfterMs = geckoBlockedUntil - Date.now();
+      throw error;
+    }
+    geckoNext = Date.now() + 2400;
+    try { return await fetchJson(`${gecko}${path}`, {}, signal); }
+    catch (error) {
+      if (error.status === 429) geckoBlockedUntil = Date.now() + Math.max(30000, error.retryAfterMs ?? 0);
+      throw error;
+    }
+  }
   const retry = new Map();
   const remember = rows => {
     for (const row of rows) {
@@ -58,11 +77,11 @@ export function marketTape(signal) {
     }
     for (const map of [cached, retry]) while (map.size > 500) map.delete(map.keys().next().value);
   };
-  const canRefresh = token => !active && Date.now() >= next && Date.now() >= (retry.get(token) ?? 0);
+  const canRefresh = token => !active && Date.now() >= geckoBlockedUntil && Date.now() >= next && Date.now() >= (retry.get(token) ?? 0);
   const tradeCache = new Map();
   let nextTrades = 0, tradeBusy = false;
   const tradeKey = (pool, token) => `${pool}:${token}`;
-  const canTrade = (pool, token, now) => !tradeBusy && now >= nextTrades &&
+  const canTrade = (pool, token, now) => !tradeBusy && now >= geckoBlockedUntil && now >= nextTrades &&
     now - (tradeCache.get(tradeKey(pool, token))?.at ?? 0) >= 12000;
   return {
     canRefresh,
@@ -75,7 +94,7 @@ export function marketTape(signal) {
       tradeCache.set(key, {at:now, rows:tradeCache.get(key)?.rows ?? []});
       while(tradeCache.size>100) tradeCache.delete(tradeCache.keys().next().value);
       try {
-        const data = await fetchJson(`${gecko}/pools/${pool}/trades`, {}, signal);
+        const data = await read(`/pools/${pool}/trades`);
         if (!Array.isArray(data?.data)) return false;
         const rows = new Map((tradeCache.get(key)?.rows ?? []).map(t => [t.id,t]));
         const previous = rows.size;
@@ -83,7 +102,7 @@ export function marketTape(signal) {
           const a = row.attributes; if (!a || !row.id) continue;
           const buy = a.to_token_address === token, sell = a.from_token_address === token;
           if (buy === sell) continue;
-          const t = {id:row.id, at:Date.parse(a.block_timestamp), price:number(buy?a.price_to_in_usd:a.price_from_in_usd), usd:number(a.volume_in_usd), side:buy?'buy':'sell'};
+          const t = {id:row.id, at:Date.parse(a.block_timestamp), price:number(buy?a.price_to_in_usd:a.price_from_in_usd), usd:number(a.volume_in_usd), side:buy?'buy':'sell', trader:address.test(a.tx_from_address ?? "") ? a.tx_from_address : undefined};
           if (Number.isFinite(t.at) && t.price > 0 && t.usd > 0) rows.set(t.id,t);
         }
         tradeCache.set(key,{at:now,rows:[...rows.values()].filter(t=>t.at>=now-300000).sort((a,b)=>a.at-b.at).slice(-3000)});
@@ -96,7 +115,7 @@ export function marketTape(signal) {
       active = true;
       next = Date.now() + 8000;
       try {
-        const payload = await fetchJson(`${gecko}/pools/multi/${pools.map(pool => pool.pool).join(",")}?include=base_token`, {}, signal);
+        const payload = await read(`/pools/multi/${pools.map(pool => pool.pool).join(",")}?include=base_token`);
         const rows = geckoPairs(payload, Date.now());
         remember(rows);
         const requested = new Set(pools.map(pool => `${pool.pool}:${pool.token}`));
@@ -108,7 +127,7 @@ export function marketTape(signal) {
       } finally { active = false; }
     },
     async feed(feed) {
-      const data = await fetchJson(`${gecko}/${feed}?include=base_token&page=1`, {}, signal);
+      const data = await read(`/${feed}?include=base_token&page=1`);
       const rows = geckoPairs(data, Date.now());
       remember(rows);
       return rows;
@@ -121,7 +140,7 @@ export function marketTape(signal) {
       next = now + 8000;
       retry.set(token, now + 60000);
       try {
-        const data = await fetchJson(`${gecko}/tokens/${token}/pools?include=base_token&page=1`, {}, signal);
+        const data = await read(`/tokens/${token}/pools?include=base_token&page=1`);
         remember(geckoPairs(data, Date.now()).filter(row => row.market.token === token));
       } catch (error) {
         if (error.status === 429) next = Date.now() + Math.max(60000, error.retryAfterMs ?? 0);

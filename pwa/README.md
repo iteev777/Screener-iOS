@@ -160,3 +160,11 @@ SCREENER_BENCH_SECONDS=3605 SCREENER_BENCH_LEARNING=/tmp/paper-learning.json \
 ```
 
 Jupiter v2:n hintavaikutus voi olla etumerkillinen. Sovellus muuntaa `priceImpactPct`-suhdeluvun prosenttiyksiköiksi ja tarkistaa itseisarvon. `priceImpact`-varakenttä on jo prosenttiyksiköissä. Oston ja vastakkaisen myyntireitin tarkistukset, kolmen prosentin reittikohtainen enimmäisvaikutus ja viiden prosentin edestakainen enimmäisvaikutus säilyvät.
+
+#### Paper-oppimisen havaintohorisontit ja malliversiot
+
+Tuoreita poolihintoja tallennetaan saatavuuden mukaan 15, 30, 60, 120, 300, 900 ja 3 600 sekunnin kohdalla. Pidemmille horisonteille varataan rajattu otos. Vain toteutusaikaan oikeasti saatavilla olevasta noteerauksesta syntyy havainto. Mallin varsinainen hintaseurantahorisontti on 120 sekuntia. Lyhyemmät ja pidemmät havainnot säilytetään erikseen, jotta samaa toteumaa ei lasketa moneen kertaan.
+
+Ostopaineen, volyymitahdin, hintaliikkeen ja likviditeetin yhteyttä kustannuskorjattuun nettotulokseen arvioidaan erikseen tokenin iän, tuntitrendin ja signaalipolun mukaan. Toteutuneet Paper-positiot ja hintaseuranta käytetään eri ryhmissä. Hintaseurantalabeli voi ohjata mallia vasta mintti- ja RugCheck-tarkistusten jälkeen. Painon muutoksen hyväksyntä vaatii vähintään 36 eri poolin aineiston ja saman suuntaisen vaikutuksen kronologisessa tarkistusaineistossa. Painojen vaikutus signaaliin rajataan neljään pisteeseen, ja turvallisuus- sekä pääomaportit suoritetaan edelleen ennen ostoa.
+
+Paper-oppimisesta säilytetään kymmenen viimeisintä strategiamallia. Asetuksen **Edellinen tallennettu malli tai lähtöasetukset** voi ottaa käyttöön pysäytetyssä Paper-tilassa. Se lukitsee edellisen mallin käytön. Havaintoja voi edelleen kertyä, ja valinta tallentuu sovelluksen asetuksiin. GeckoTerminalin pooli- ja kauppahaut jakavat pyyntötahtinsa ja yhteisen kiintiötaukonsa.

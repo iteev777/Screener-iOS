@@ -48,12 +48,18 @@ let learned;
 const learningChanges = [];
 let learningKey;
 const stages = new Map();
+const uniqueFound = new Set();
+const uniqueAnalyzed = new Set();
+const uniqueApproved = new Set();
+const uniqueRejected = new Set();
 const outcomes = new Map();
 const calibration = new Map();
 const closed = [];
 const positionResults = new Map();
 let processed = 0;
 let fees = 0;
+let slippageUsd = 0;
+let buys = 0, sells = 0;
 let delay = 0;
 let delayedEntries = 0;
 let peakEquity = policy.paperCapital;
@@ -63,6 +69,11 @@ function recordPaper() {
   const newCount = (book.totalTrades ?? 0) - processed;
   for (const trade of book.trades.slice(0, newCount).reverse()) {
     fees += trade.feeUsd;
+    const buy = trade.side === "Osto";
+    if (buy) buys++; else sells++;
+    if (Number.isFinite(trade.market?.price)) {
+      slippageUsd += trade.quantity * Math.max(0, buy ? trade.price - trade.market.price : trade.market.price - trade.price);
+    }
     if (trade.side === "Osto" && Number.isFinite(trade.executionDelayMs)) { delay += trade.executionDelayMs; delayedEntries++; }
     if (trade.side !== "Myynti") continue;
     const result = (positionResults.get(trade.token) ?? 0) + trade.realizedPnl;
@@ -86,6 +97,9 @@ try {
     },
     saveLearning: async state => { learned = state; },
     diagnostic({ token, stage, outcome, reason, score, strategyCode }) {
+      if (["momentum","market","liquidity","mint","rug","pool","route","eligible"].includes(stage)) uniqueAnalyzed.add(token);
+      if (stage === "eligible" && outcome === "approve") uniqueApproved.add(token);
+      if (outcome === "reject") uniqueRejected.add(token);
       const bucket = `${stage}/${outcome}`;
       if (!stages.has(bucket)) stages.set(bucket, new Set());
       stages.get(bucket).add(token);
@@ -97,11 +111,15 @@ try {
       if (["signal", "score"].includes(strategyCode)) calibration.set(token, Math.max(score, calibration.get(token) ?? 0));
     },
     report: (_, portfolio) => { if (portfolio) book = portfolio; },
-    event: event => { if (event.status === "found" && event.reason === "PumpPortal") totalPump++; },
+    event(entry) {
+      if (entry.status !== "found") return;
+      uniqueFound.add(entry.mint);
+      if (entry.reason === "PumpPortal") totalPump++;
+    },
     telemetry(stats) {
       last = stats;
       if (stats.learning) {
-        const key = Object.values(stats.learning.tracks).map(track => track.threshold).join("/");
+        const key = stats.learning.modelRevision + ":" + Object.values(stats.learning.tracks).map(track => track.threshold).join("/");
         if (key !== learningKey) {
           learningChanges.push({seconds: Math.floor((Date.now()-started)/1000), ...stats.learning});
           learningKey = key;
@@ -134,9 +152,12 @@ log({ final: true, strategy, seconds: (Date.now() - started) / 1000, last, total
   topReasons: [...outcomes].map(([key, tokens]) => [key, tokens.size]).sort((a, b) => b[1] - a[1]).slice(0, 30),
   thresholds: Object.fromEntries([70, 72, 76, 80, 84, 88].map(threshold =>
     [threshold, [...calibration.values()].filter(score => score >= threshold).length])),
+  uniqueFound: uniqueFound.size, uniqueAnalyzed: uniqueAnalyzed.size, uniqueApproved: uniqueApproved.size, uniqueRejected: uniqueRejected.size,
   learningChanges, learnedSamples: learned?.samples.length ?? 0,
-  trades: book.totalTrades ?? 0, closed: closed.length, open: Object.keys(book.positions).length,
+  trades: book.totalTrades ?? 0, buys, sells, closed: closed.length, open: Object.keys(book.positions).length,
   winRate: closed.length ? closed.filter(position => position.pnl > 0).length / closed.length : null,
   averageHoldMs: closed.length ? closed.reduce((sum, position) => sum + position.heldMs, 0) / closed.length : null,
-  equity: equity(), netReturn: equity() / policy.paperCapital - 1, maxDrawdown, fees,
+  equity: equity(), netReturn: equity() / policy.paperCapital - 1,
+  grossReturnEstimate: (equity() + fees + slippageUsd) / policy.paperCapital - 1,
+  unrealized: equity() - policy.paperCapital - book.realized, maxDrawdown, fees, slippageUsd,
   averageEntryDelayMs: delayedEntries ? delay / delayedEntries : null, cash: book.cash, realized: book.realized, samples: pairs.size, http: Object.fromEntries(http) });

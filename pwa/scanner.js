@@ -11,6 +11,7 @@ import { momentumExit, momentumSize, shortMomentum, momentumSignal, earlyMomentu
 import { fullRugCheck } from "./trojan-security.js";
 import { analyzeEntryRoute } from "./trojan-entry.js";
 import { verifyPools, verifyPoolReserves, estimateBinSwap, estimateTickSwap } from "./trojan-pools.js";
+import { learnedScore, marketSegment, signalFeatures } from "./paper-signal-model.js";
 import { paperLearning, scoreBand } from "./momentum-learning.js";
 import { CandidateQueue, marketBatch, invalidateMarket, sourcesFor, watchPumpPortal } from "./trojan-discovery.js";
 
@@ -163,7 +164,7 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
         portfolio.totalTrades = (portfolio.totalTrades ?? portfolio.trades.length) + 1;
         const entry = position ? position.cost / position.sol : book.cost / book.sol;
         portfolio.trades.unshift({ ...book.trades[0], strategy: selectedStrategy, symbol: tick.symbol, token: tick.token, pool: tick.pool,
-          track: tick.track ?? position?.track, score: tick.score ?? position?.score, entryReason: position?.entryReason ?? tick.analysisReason,
+          track: tick.track ?? position?.track, segment:tick.segment ?? position?.segment, features:tick.features ?? position?.features, score: tick.score ?? position?.score, entryReason: position?.entryReason ?? tick.analysisReason,
           verification: tick.verification, market: marketSnapshot(tick), entryPrice: entry,
           peakReturn: Math.max(position?.peak ?? tick.price, tick.price) / entry - 1,
           worstReturn: Math.min(position?.worst ?? tick.price, tick.price) / entry - 1 });
@@ -175,13 +176,20 @@ export function advancePortfolio(portfolio, ticks, engine, policy, decide, eligi
           : day(tick.at) === book.lossDay && book.lossToday >= policy.lossUsd ? "Päivän tappioraja"
           : day(tick.at) === book.buyDay && book.buysToday >= policy.maxDailyBuys ? "Päivän ostoraja"
           : previousTrade && tick.at < previousTrade.at + policy.cooldownSeconds * 1000 ? "Saman tokenin kauppajäähy"
-          : "Riski-, kelpoisuus- tai voimassaoloraja esti oston";
+          : !eligible(tick.token) ? "Oston turvallisuuskelpoisuus puuttuu"
+          : tick.routeExpires != null && Date.now() > tick.routeExpires ? "Osto- ja myyntireitti vanheni"
+          : !profileAllowed || positions.length >= (policy.maxPools ?? scanLimit) ? "Positioraja"
+          : duplicate ? "Token on jo toisessa avoimessa poolissa"
+          : tick.liquidity < executionPolicy.minLiquidity ? "Likviditeetin alaraja"
+          : orderUsd <= 0 || book.cash < orderUsd ? "Kassa tai positiokoon alaraja"
+          : exposure + (order?.usd ?? orderUsd) > policy.exposureUsd ? "Kokonaisaltistuksen raja"
+          : "Oston markkina- tai kelpoisuustieto puuttuu";
         recordDecision(portfolio, tick, "REJECT", reason);
       } else if (position) recordDecision(portfolio, tick, "HOLD", "Poistumisehdot eivät täyty");
       if (book.sol > 0) {
         const { sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool, lastTradeAt } = book;
         portfolio.positions[key] = { strategy: selectedStrategy, sol, cost, openedAt, added, profitTaken, entryLiquidity, entryPool,
-          name: tick.name ?? position?.name, track: tick.track ?? position?.track, score: tick.score ?? position?.score,
+          name: tick.name ?? position?.name, track: tick.track ?? position?.track, segment:tick.segment ?? position?.segment, features:tick.features ?? position?.features, score: tick.score ?? position?.score,
           entryReason: position?.entryReason ?? tick.analysisReason,
           worst: Math.min(position?.worst ?? tick.price, tick.price),
           liquidity: tick.liquidity, change5: tick.change5, lastTradeAt, peak: Math.max(book.peak ?? tick.price, tick.price), mark: tick.price,
@@ -455,7 +463,10 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         for (const item of batch) {
           const primary = markets.get(item.token);
           const alternate = preferMarket(primary, tape.get(item.token), now);
-          if (alternate) markets.set(item.token, alternate);
+          if (alternate) {
+            markets.set(item.token, alternate);
+            learning.mark(alternate.market, alternate.observedAt);
+          }
         }
         const needsData = batch.find(item => tape.canRefresh(item.token) && !completeTape(markets.get(item.token)) &&
           (item.sources.has("PumpPortal") || item.sources.size >= 2 || markets.has(item.token)));
@@ -511,16 +522,21 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           }
           const depth = depthHistory.get(position);
           const windows = shortMomentum(tape.trades(market.pool, market.token), now);
-          const rolling = { ...row.strategy, track: "rolling", scoreFloor: threshold("rolling") };
-          const short = { ...momentumSignal(windows, row.quality.score, threshold("short")), track:"short",
-            scoreFloor: threshold("short"), reason: "Lyhyen aikavälin momentum" };
-          const early = { ...earlyMomentum(windows, market, row.quality.score, threshold("early"), policy, depth?.previous),
-            scoreFloor: threshold("early"), shortVolume: windows[15]?.volume };
-          // A threshold adjustment can change a score-only decision, never an
-          // adverse-flow, malformed-data or safety rejection.
-          if (["score","signal"].includes(rolling.code)) {
-            rolling.decision = rolling.score >= rolling.scoreFloor ? "approve" : "watch";
-          }
+          const segment = marketSegment(market, now);
+          const withEvidence = (strategy, track, structural, window) => {
+            const features = signalFeatures(market, window);
+            const score = structural ? learnedScore(calibration?.weights,track,segment,features,strategy.score) : strategy.score;
+            const scoreFloor = threshold(track);
+            const decision = structural ? score >= scoreFloor ? "approve" : "watch" : strategy.decision;
+            return { ...strategy, decision, code: structural && decision === "watch" ? "score" : strategy.code,
+              score, track, scoreFloor, segment, features };
+          };
+          const rolling = withEvidence(row.strategy, "rolling", ["score","signal"].includes(row.strategy.code));
+          const shortSignal = momentumSignal(windows,row.quality.score,threshold("short"));
+          const short = withEvidence({ ...shortSignal, reason:"Lyhyen aikavälin momentum" }, "short", shortSignal.structural, windows[15]);
+          const earlySignal = earlyMomentum(windows,market,row.quality.score,threshold("early"),policy,depth?.previous);
+          const early = withEvidence({ ...earlySignal, shortVolume:windows[15]?.volume }, "early",
+            earlySignal.code === "early-flow" || earlySignal.code === "score", windows[15]);
           const options = [rolling, short, early];
           const weakFlow = rolling.code === "buy-pressure" && Number.isFinite(market.transactions?.m5?.buys) &&
             market.transactions.m5.buys < market.transactions.m5.sells;
@@ -533,7 +549,8 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           if (observation) {
             const measurable = observation.code === "score" || observation.decision === "approve";
             const safe = mintCache.get(market.token)?.ok === true && rugCache.get(market.token)?.ok === true;
-            learning.observe(market, observedAt, observation.track, observation.score, measurable && !weakFlow, safe);
+            learning.observe(market, observedAt, observation.track, observation.score, measurable && !weakFlow, safe,
+              {features:observation.features, segment:observation.segment, missed:!calibrated});
             if (measurable && !weakFlow) learning.proveSafety(market, safe);
             if (now >= nextShadowSafety && !shadowCandidate && !weakFlow && !safe &&
                 observation.code === "score" && observation.score >= policy.momentumScore - 8 &&
@@ -662,7 +679,8 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         const route = cachedRoute?.expires > Date.now() ? cachedRoute : null;
         let checked = decision;
         let stage = strategy?.code === "liquidity-floor" ? "liquidity" : pair ? "momentum" : "market";
-        let reason = strategy?.reason ?? (pair ? "Markkinadata tarkistettu" : "Poolin hintadata puuttuu");
+        let reason = strategy?.reason ?? (pair ? "Markkinadata tarkistettu"
+          : tape?.get(item.token) ? "Viimeisin poolin noteeraus vanheni" : "Poolin hintadata puuttuu");
         if (decision === "approve") {
           if (authority === false) { stage = "mint"; checked = "reject"; reason = "Mintin omistaja tai minttaus-/jäädytysvaltuus"; }
           else if (rug === false) { stage = "rug"; checked = "reject"; reason = report.reason || "RugCheck hylkäsi"; }
@@ -700,7 +718,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         }
         if (checked === "approve") {
           if (route) item.due = Math.min(item.due, route.expires);
-          candidates.push({ ...pair.market, score: strategy?.score, scoreFloor: strategy?.scoreFloor, track: strategy?.track, shortVolume: strategy?.shortVolume, analysisReason: strategy?.reason, verification: reason, tradeStrategy: policy.strategy === 8 ? 8 : policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: pair.observedAt, priority: item.priority, routeExpires: route?.expires, signalAt: route?.checkedAt, entryImpactPct: route?.entryImpactPct });
+          candidates.push({ ...pair.market, score: strategy?.score, scoreFloor: strategy?.scoreFloor, track: strategy?.track, segment:strategy?.segment, features:strategy?.features, shortVolume: strategy?.shortVolume, analysisReason: strategy?.reason, verification: reason, tradeStrategy: policy.strategy === 8 ? 8 : policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: pair.observedAt, priority: item.priority, routeExpires: route?.expires, signalAt: route?.checkedAt, entryImpactPct: route?.entryImpactPct });
         }
       }
       const previousApproval = new Map(approvedTicks.map(tick => [positionKey(tick), tick.signalAt]));
@@ -848,10 +866,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
               const byKey = new Map(refreshed.map(tick => [positionKey(tick), tick]));
               for (const signalTick of entries) {
                 const current = byKey.get(positionKey(signalTick));
-                if (current && current.price <= signalTick.price * 1.01 && current.at <= signalTick.routeExpires) {
+                if (current && current.price <= signalTick.price * 1.01 && current.price >= signalTick.price * .97 && current.at <= signalTick.routeExpires) {
                   ticks.push({ ...signalTick, ...current });
                 } else diagnostic?.({ token: signalTick.token, stage: "execution", outcome: "watch",
-                  reason: "Tuore hinta puuttuu, ostohinta karkasi tai reitti vanheni" });
+                  reason: !current ? "Tuore toteutushinta puuttuu" : current.at > signalTick.routeExpires
+                    ? "Jupiter-reitti vanheni hintahaun aikana" : "Hinta muuttui liikaa ennen toteutusta" });
               }
             } catch (error) {
               if (!signal.aborted) sourceError = `Toteutushinta: ${error.message}`;
@@ -972,11 +991,14 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   async function learn() {
     try {
       while (!signal.aborted) {
-        await pause(20000, signal);
+        await pause(10000, signal);
         if (signal.aborted) break;
         try {
           const due = learning.due(Date.now());
-          if (due.length) for (const tick of await pricesWithFallback(due)) learning.mark(tick, tick.at);
+          if (due.length) {
+            const quotes = Date.now() < dexRetryAt ? await tape.poolPrices(due) : await pricesWithFallback(due);
+            for (const tick of quotes) learning.mark(tick, tick.at);
+          }
           calibration = learning.calibration(policy.momentumScore, Date.now());
           if (learning.dirty && saveLearning) {
             const state = learning.snapshot();

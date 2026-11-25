@@ -71,5 +71,43 @@ test("a completed observation is not resurrected by another tab's older save", a
   const latest = open.snapshot();
   const merged = mergeLearning(latest,old,now+120000);
   assert.equal(merged.samples.length,1);
-  assert.equal(merged.pending.length,0);
+  assert.deepEqual(merged.pending[0].remaining,[300,900,3600]);
+});
+
+test("time-bounded observation records actual checkpoints without imputing skipped prices", () => {
+  const model = paperLearning(undefined,defaults);
+  model.observe(market,now,"early",78,true,true,{missed:true});
+  for (const seconds of [15,30,60,120,300,900,3600]) {
+    assert.equal(model.mark({...market,price:1.04},now+seconds*1000),true);
+  }
+  assert.deepEqual(model.snapshot().samples.map(row=>row.horizon),[15,30,60,120,300,900,3600]);
+  assert.equal(model.calibration(80,now+3600000).missed,1);
+  assert.equal(model.snapshot().pending.length,0);
+});
+
+test("feature weights are learned only with chronological holdout confirmation", async () => {
+  const { fitSignalWeights, learnedScore } = await import("./paper-signal-model.js");
+  const samples = Array.from({length:36},(_,i) => ({
+    key:String(i), type:"shadow",track:"early",segment:"new/quiet", at:now+i, horizon:120, verified:true,
+    calibratable:true, features:{buying:i%2 ? .9 : .1}, net:(i%2 ? .05:-.04)
+  }));
+  const fitted = fitSignalWeights(samples,now+40);
+  assert.equal(fitted["shadow/early/new/quiet"].weights.buying,2);
+  assert.ok(learnedScore(fitted,"early","new/quiet",{buying:.95},80)>80);
+  assert.equal(learnedScore(fitted,"early","listed/quiet",{buying:.95},80),80);
+  const reversed = samples.map((row,i)=>i<24?row:{...row,net:-row.net});
+  assert.deepEqual(fitSignalWeights(reversed,now+40),{});
+  assert.deepEqual(fitSignalWeights(samples,now+15),{});
+});
+
+test("rollback restores the previous model and disables promotion during evaluation", () => {
+  const weights = {"shadow/early/new/quiet":{weights:{buying:2}}};
+  const model = paperLearning({version:2,samples:[],pending:[],paperKeys:[],models:[
+    {id:10,at:now-20000,settings:{early:-4},weights},
+    {id:11,at:now-10000,settings:{early:6},weights:{}}
+  ]},{...defaults,momentumRollback:1});
+  const result = model.calibration(80,now);
+  assert.equal(result.modelRevision,10);
+  assert.equal(result.tracks.early.threshold,76);
+  assert.equal(model.snapshot().models.length,2);
 });

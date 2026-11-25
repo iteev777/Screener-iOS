@@ -112,7 +112,10 @@ export function shortMomentum(trades, now) {
   for (const seconds of [5,15,30,60,300]) {
     const w = rows.filter(t => t.at > now-seconds*1000);
     const volume = w.reduce((n,t)=>n+t.usd,0);
-    windows[seconds] = w.length >= 3 ? { count:w.length, volume, spanMs:w.at(-1).at-w[0].at,
+    const buyers = w.filter(trade => trade.side === "buy");
+    const identified = buyers.filter(trade => trade.trader);
+    const distinctBuyers = identified.length === buyers.length ? new Set(identified.map(trade => trade.trader)).size : null;
+    windows[seconds] = w.length >= 3 ? { count:w.length, volume, spanMs:w.at(-1).at-w[0].at, distinctBuyers,
       pressure:w.filter(t=>t.side==="buy").reduce((n,t)=>n+t.usd,0)/volume,
       move:(w.at(-1).price/w[0].price-1)*100, high:Math.max(...w.map(t=>t.price)),
       low:Math.min(...w.map(t=>t.price)) } : null;
@@ -131,7 +134,7 @@ export function momentumSignal(w, quality, threshold=80) {
   const pullback=d.move>0 && c.move<0 && a.move>0 && a.pressure>=.65;
   const breakout=d.move>0 && b.move>0 && a.move>0 && a.high>=d.high && acceleration>=1.5;
   const signal=breakout?"breakout":pullback?"pullback":early?"early":null;
-  return {decision:signal && score>=threshold?"approve":"watch",code:signal??"weak-momentum",score};
+  return {decision:signal && score>=threshold?"approve":"watch",code:signal??"weak-momentum",structural:Boolean(signal),score};
 }
 
 // The early path uses only real trades and a priced pool. It can use a shorter
@@ -152,6 +155,8 @@ export function earlyMomentum(windows, market, quality, threshold, policy, previ
   const impact = ticket / (market.liquidity / 2 + ticket);
   const estimatedCostPct = (2 * (policy.feeBps / 10000 + Math.max(policy.slippageBps / 10000, impact))) * 100;
   const activity = recent.volume / Math.max(ticket, market.liquidity * .004);
+  if (recent.distinctBuyers === 1 && recent.count >= 5)
+    return watch("short-concentration", "Lyhyen ikkunan ostoista vastaa yksi tunnistettu lompakko");
   if (!(recent.move > estimatedCostPct) || recent.move > 12 || context.move < -.5 ||
       recent.pressure < .60 || context.pressure < .54 || activity < 1)
     return watch("short-flow", "Lyhyen ikkunan ostovirta tai kulujen jälkeinen liike ei riitä");

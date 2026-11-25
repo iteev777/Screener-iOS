@@ -547,8 +547,8 @@ async function startScan() {
         }));
         byId("monitor-summary").textContent = `PumpPortal ${stats.pump} · Työntekijät ${stats.activeWorkers}/${stats.adaptiveLimit} (max ${stats.workerLimit}) · Analyysi ${stats.averageAnalysisMs} ms/token · Löydöstä analyysiin ${stats.averageDiscoveryMs} ms`;
         if (stats.learning) {
-          const { tracks, shadow, paper } = stats.learning;
-          byId("monitor-summary").textContent += ` · Momentum ${tracks.rolling.threshold}/${tracks.short.threshold}/${tracks.early.threshold} · hintaseuranta ${shadow} · suljetut Paper-positiot ${paper}`;
+          const { tracks, shadow, paper, missed, modelRevision, rollback } = stats.learning;
+          byId("monitor-summary").textContent += ` · Momentum ${tracks.rolling.threshold}/${tracks.short.threshold}/${tracks.early.threshold} · hintaseuranta ${shadow} · suljetut Paper-positiot ${paper} · seurannassa myönteiset ohitukset ${missed} · ${rollback ? "Palautettu " : "Malli "}${modelRevision}`;
         }
         const sources = [...stats.sources.map(source => [source.name, source.error || (source.busy ? "Haetaan" :
           source.count == null ? "Odottaa" : `Viime haussa ${source.count}`)]), ...Object.entries(stats.apis)];
