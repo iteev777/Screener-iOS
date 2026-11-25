@@ -7,7 +7,7 @@ import { copyGroup } from "./copy.js";
 import { analystWorker } from "./candidate-analyst.js";
 import { marketTape, preferMarket, completeTape } from "./market-tape.js";
 import { poolStream } from "./pool-stream.js";
-import { momentumExit, momentumSize, shortMomentum, momentumSignal } from "./momentum.js";
+import { momentumExit, momentumSize, shortMomentum, momentumSignal, momentumCalibration } from "./momentum.js";
 import { fullRugCheck } from "./trojan-security.js";
 import { analyzeEntryRoute } from "./trojan-entry.js";
 import { verifyPools, verifyPoolReserves, estimateBinSwap, estimateTickSwap } from "./trojan-pools.js";
@@ -253,6 +253,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   const scanProfile = policy.strategy === 6 ? "sniper" : undefined;
   const momentum = policy.strategy === 8;
   const tape = momentum ? marketTape(signal) : undefined;
+  let calibratedThreshold = policy.momentumScore, calibrationAt = 0;
   const watched = new Map();
   const heldPools = new Set();
   let poolEventAt = 0;
@@ -466,17 +467,25 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         for (const [token, value] of cache) if (value.expires <= now) cache.delete(token);
       }
       if (momentum) {
+        if (now - calibrationAt >= 60000) {
+          const portfolio = await load();
+          calibratedThreshold = momentumCalibration(portfolio.trades ?? [], policy.momentumScore).threshold;
+          calibrationAt = now;
+        }
         const promising = ranked.filter(row => row.pair && row.quality?.tier !== "reject" && row.decision !== "reject").sort((a,b)=>(b.quality?.score??0)-(a.quality?.score??0));
         const target = promising.find(row => !tape.trades(row.pair.market.pool,row.item.token).some(t=>t.at>now-8000)) ?? promising[0];
         if (target) void tape.refreshTrades(target.pair.market.pool,target.item.token).then(()=>wake(target.item)).catch(error=>{sourceError=`Trade tape: ${error.message}`;});
         for (const row of promising) {
           const windows=shortMomentum(tape.trades(row.pair.market.pool,row.item.token),now);
-          const signal=momentumSignal(windows,row.quality?.score,policy.momentumScore);
+          const signal=momentumSignal(windows,row.quality?.score,calibratedThreshold);
           if (signal.decision==="approve" && row.decision==="watch" && ["score","weak-momentum","no-rebound","buy-pressure","missing-baseline"].includes(row.strategy?.code)) {
             row.decision="approve"; row.strategy={...signal,reason:`Short Momentum: ${signal.code}`};
           }
         }
         for (const row of ranked) {
+          if (row.decision === 'approve' && row.strategy?.score < calibratedThreshold) {
+            row.decision = 'watch'; row.strategy = {...row.strategy, code:'score', reason:'Paper-kalibroinnin pisteraja'};
+          }
           if (!row.pair || !(row.decision === "approve" || row.strategy?.code === "score")) continue;
           const pool = row.pair.market.pool;
           const previous = watched.get(pool);
