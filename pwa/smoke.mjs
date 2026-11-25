@@ -189,10 +189,13 @@ try {
   const livePage = await liveContext.newPage();
   await livePage.route("**/live-adapter.js", route => route.fulfill({
     contentType: "application/javascript",
-    body: `export function createLiveAdapter() {
+    body: `export async function reconcileLiveSignature() {
+      throw new Error("The fixture has no transactions to reconcile");
+    }
+    export function createLiveAdapter() {
       let book = { cash: 100, sol: 0, walletSol: 2, trades: [] };
       return {
-        ready: true, connect: async () => "mock-wallet", onWalletChange() {},
+        ready: true, journalAware: true, connect: async () => "11111111111111111111111111111111", onWalletChange() {},
         snapshot: async () => book,
         async execute({ order, price }) {
           if (order.side !== "Osto" || order.usd !== 100 || price !== 142) {
@@ -208,9 +211,10 @@ try {
   await livePage.route(marketUrl, route => route.fulfill({ status: 503 }));
   await livePage.goto(base);
   await livePage.locator("#mode").selectOption("live");
-  assert.equal(await livePage.locator("#live").isDisabled(), true);
+  await livePage.waitForFunction(() => document.getElementById("live").disabled);
   await livePage.locator("#connect").click();
   await livePage.locator("#balance").getByText(/2 SOL/).waitFor();
+  await livePage.locator("#status").getByText("Lompakko yhdistetty.").waitFor();
   livePage.once("dialog", dialog => dialog.dismiss());
   await livePage.locator("#live").click();
   assert.equal(await livePage.locator("#mode").isDisabled(), false);

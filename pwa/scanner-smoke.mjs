@@ -27,6 +27,7 @@ try {
     if (new URL(route.request().url()).origin === new URL(site).origin) return route.continue();
     return route.fulfill({ json: [], headers: { "Access-Control-Allow-Origin": "*" } });
   });
+  let notificationCount = 0;
   let dropping = false;
   let fail = false;
   await page.route("https://api.geckoterminal.com/api/v2/networks/solana/**", route =>
@@ -37,9 +38,24 @@ try {
     })), included: market.map(([token, , symbol]) => ({
       type: "token", id: `solana_${token}`, attributes: { symbol }
     })) } }));
+  for (const endpoint of ["wss://solana-rpc.publicnode.com/", "wss://api.mainnet-beta.solana.com/"]) {
+    await page.routeWebSocket(endpoint, socket => {
+      socket.onMessage(data => {
+        const message = JSON.parse(data);
+        if (message.method !== "logsSubscribe") return;
+        notificationCount++;
+        socket.send(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: message.id }));
+        socket.send(JSON.stringify({ method: "logsNotification", params: {
+          subscription: message.id, result: { context: { slot: 100 }, value: { err: null } }
+        } }));
+      });
+    });
+  }
   await page.routeWebSocket("wss://pumpportal.fun/api/data", socket => {
     socket.onMessage(data => {
-      assert.equal(JSON.parse(data).method, "subscribeNewToken");
+      const { method } = JSON.parse(data);
+      if (momentum && method === "subscribeMigration") return;
+      assert.equal(method, "subscribeNewToken");
       for (const [mint] of market) socket.send(JSON.stringify({ txType: "create", mint }));
     });
   });
@@ -166,6 +182,8 @@ try {
     assert.equal(state.trades.length, 2);
     assert.ok(state.trades.every(trade => trade.strategy === 8 && trade.score >= 80 && trade.feeUsd > 0));
     assert.ok(state.history.length > 0);
+    assert.ok(notificationCount > 0);
+    assert.ok(state.trades.every(trade => trade.executionDelayMs >= 1000));
   } else assert.match(await page.locator("#scan-balance").innerText(), sniper ? /990/ : /800/);
   fail = true;
   await page.clock.runFor(6001);

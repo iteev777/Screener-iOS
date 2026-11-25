@@ -13,7 +13,7 @@
 </head>
 <body>
 <main>
-<header><p>Solana · Kaupankäynti</p><h1>Screener iOS</h1></header>
+<header class="app-header"><h1>Screener <span>iOS</span></h1><button class="secondary" type="button" data-open-view="tokens">Markkinat</button></header>
 <nav id="dashboard-nav" aria-label="Dashboard"><button type="button" data-view="home" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10H3z"/><path d="M9 20v-7h6v7"/></svg><span>Home</span></button><button type="button" data-view="tokens"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M8 12h8M12 8v8"/></svg><span>Tokens</span></button><button type="button" data-view="positions"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="14" rx="2"/><path d="M8 7V4h8v3M3 13h18"/></svg><span>Positions</span></button><button type="button" data-view="trader"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17 9 11l4 4 8-10M15 5h6v6"/></svg><span>Live</span></button><button type="button" data-view="filtering"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg><span>Feed</span></button><button type="button" data-view="monitoring"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg><span>Agents</span></button><button type="button" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4M5 5l3 3m8 8 3 3M5 19l3-3m8-8 3-3"/></svg><span>Settings</span></button></nav>
 <section class="trade-console" aria-label="Kaupankäynnin hallinta">
 <div class="console-head">
@@ -37,7 +37,23 @@
   <h2>Paper Trading · salkku</h2>
   <strong id="home-equity">—</strong>
   <p id="home-return">—</p>
-  <canvas id="equity-chart" width="640" height="140" aria-label="Tallennettu Paper-salkun arvo" hidden></canvas>
+  <canvas id="equity-chart" width="640" height="214" aria-label="Tallennettu Paper-salkun arvo" hidden></canvas>
+  <p id="equity-empty" class="chart-empty">Ei noteerauksia valitulla aikavälillä.</p>
+  <div id="equity-range" class="equity-range" role="group" aria-label="Salkkukaavion aikaväli">
+    <button type="button" data-equity-hours="1" aria-pressed="false">1 h</button>
+    <button type="button" data-equity-hours="4" aria-pressed="false">4 h</button>
+    <button type="button" data-equity-hours="24" aria-pressed="false">1 pv</button>
+    <button type="button" data-equity-hours="0" aria-pressed="true">Kaikki</button>
+  </div>
+</section>
+<section id="home-agents-section" class="home-panel" data-page="home">
+  <div class="section-heading"><h2>Agentit</h2><button type="button" data-open-view="monitoring">Tilanne ja yhteydet</button></div>
+  <div id="home-agents" class="agent-cards" tabindex="0" aria-label="Agenttien toimintatila"><p>Odotetaan skannauksen käynnistystä.</p></div>
+</section>
+<section id="home-activity" class="home-panel" data-page="home">
+  <div class="section-heading"><h2>Viimeisimmät Paper-tapahtumat</h2><button type="button" data-open-view="filtering">Avaa loki</button></div>
+  <ol id="home-feed" class="home-feed"></ol>
+  <p id="home-feed-empty">Ei vielä paperikauppoja tai ostosignaaleja.</p>
 </section>
 <section id="home-metrics" data-page="home" aria-label="Paper-salkun tilastot">
   <div class="metric-grid">
@@ -88,6 +104,7 @@
 <details><summary>Aggressive Momentum ja Paper-salkku</summary>
 <label>Uuden Paper-salkun aloituspääoma, USD<input name="paperCapital" type="number" min="10" max="1000000" step="any" required></label>
 <label>Momentumin pisteraja (50–100)<input name="momentumScore" type="number" step="any" required></label>
+<label>Momentumin ensimmäisen myynnin osuus, %<input name="momentumProfitShare" type="number" min="10" max="90" required></label>
 <label>Momentumin vähimmäisosto, USD<input name="momentumMinUsd" type="number" step="any" required></label>
 <label>Momentumin enimmäisosto, USD<input name="momentumMaxUsd" type="number" step="any" required></label>
 <label>Momentumin suurin trailing-etäisyys, %<input name="momentumTrailing" type="number" step="any" required></label>

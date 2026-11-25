@@ -129,3 +129,19 @@ Aidon datan Momentum-ajon kesto oli 15 min 5 s. Skanneri löysi ja analysoi 996 
 Samasta ajosta poimittiin 300 todellista DEX-parivastausta. Selaimen JavaScript ja Trojan V2:n Python-versio (`b3b82fe`) saivat samat markkinatiedot, mittaushetket ja lähteet. Quality-pisteet ja alkuperäisten oletusten Main- ja Sniper-analyysit täsmäsivät kummassakin 300/300. Screener-iOS:n lisärajoilla päätökset täsmäsivät Mainissa 298/300 ja Sniperissä 296/300. Yksi Sniperin hyväksyntä muuttui odotukseksi. Vertailu koski pisteytystä ja analyysipäätöstä ennen selainversion lisätarkistuksia.
 
 Pilviympäristön CPU-kokeessa 30 000 markkinarivin Quality-, Main- ja Sniper-laskenta kesti JavaScriptillä 146 ms ja Pythonilla 595 ms. Varsinaiseen tokenien etsinnän ja kaupankäynnin vertailuun tarvittaisiin samaan aikaan ajettu Trojan V2:n koko putki. Aidon datan ajossa kauppoja ei kirjattu, joten sen perusteella ei voi arvioida täyttöastetta eikä tuottoa. Saman tokenin uudelleenostojäähy ja vanhan ostonoteerauksen esto testattiin erikseen.
+
+### Momentumin tuntikoe ja kalibrointi
+
+GeckoTerminalin uusien ja trendaavien poolien vastauksista käytetään tokenparia, hintaa, likviditeettiä, volyymiä, hintamuutoksia ja tapahtumamääriä. DEX Screener on ensisijainen lähde. GeckoTerminal täydentää puuttuvaa markkinakuvaa tuoreella kokonaisella vastauksella samasta poolista tai tarjoaa tarkistettavan poolin, kun ensisijainen lähde ei löytänyt tokenia. Yksittäisiä täydennyshakuja tehdään enintään yksi kahdeksassa sekunnissa. Jos kumpikaan lähde ei anna varmennettavaa hintaa, Paper-kirja ei muodosta toteumaa.
+
+PumpPortalin migraatio herättää ehdokkaan uudelleen arvioitavaksi. Solanan WebSocket seuraa yhteensä enintään kahdeksaa lupaavaa tai avointa poolia. Tilimuutos aikaistaa varsinaista hintahakua, ja avoimien poolien normaali hintapollaus jatkuu yhteysvirheiden varalta. Volyymikiihtyvyyttä verrataan 5 minuutin jaksoa edeltävään ajanjaksoon, korkeintaan 55 minuuttiin. Vähintään viisi toteutunutta kauppaa tarvitaan ostopaineen arvioimiseen. Nuoren poolin puuttuva vertailujakso edellyttää vahvempaa havaittua kauppamäärää, ostopainetta ja volyymiä suhteessa sen likviditeettiin.
+
+Paper-ostoa yritetään vähintään sekunti reittitarkistuksen jälkeen tuoreella hinnalla. Uusi noteeraus, oston hintapoikkeama ja voimassa oleva Jupiter-reitti ratkaisevat, voiko toteumaa simuloida. Kulut ja liukuma lasketaan toteumiin. Heikkenevän voitollisen position ensimmäinen kotiutus on erikseen säädettävä, oletuksena 50 %. Toinen osuus vapautuu poistumisehdon täyttyessä. Saman tokenin uudelleenostossa noudatetaan edelleen kauppajäähyä.
+
+```sh
+SCREENER_BENCH_SECONDS=3605 node --use-env-proxy pwa/paper-benchmark.mjs > /tmp/paper-momentum-60m.jsonl
+```
+
+Testi raportoi analyysin vaiheet ja syyt. Mintti voi näkyä eri vaiheissa ja syissä, jos sen tiedot täydentyvät tai muuttuvat. Pisterajavertailu laskee ehdokkaat, jotka täyttivät muut momentumin ehdot. Se kuvaa pisterajan herkkyyttä ennen mintti-, RugCheck-, likviditeetti- ja reittitarkistuksia. Nettonoteeraus sisältää kassan ja avoimet positiot viimeisillä hinnoilla. Voittoprosentti ja pitoaika lasketaan kokonaan suljetuista positioista, osamyynnit mukaan lukien. Arvonalenema lasketaan simuloidun salkun noteeratuista huipuista.
+
+Aiemmasta 15 minuutin ajosta tallennetuilla 300 aidolla DEX-parivastauksella vanha ja uusi pisteytys päästivät kumpikin viisi rajan 80 läpi. Uuden pisteytyksen rajat 70, 72 ja 76 päästivät kukin seitsemän, raja 84 kolme ja raja 88 yhden. Kun uuden pisteytyksen viiden ehdokkaan mintit ja RugCheck tarkistettiin erikseen nykyisestä ketju- ja raporttidatasta, kaksi pysähtyi minttitarkistukseen ja kolme RugCheckiin. Pisteraja säilytettiin 80:ssä. Tämä testi ei käytä historiasta arvattuja RugCheck-tiloja tai oston jälkeistä tuottoa.

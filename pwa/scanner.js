@@ -5,15 +5,18 @@ import { applyPaperFill, orderFor, reasons, strategySettings } from "./policy.js
 import { ruleSignal } from "./rules.js";
 import { copyGroup } from "./copy.js";
 import { analystWorker } from "./candidate-analyst.js";
+import { marketTape, preferMarket, completeTape } from "./market-tape.js";
+import { poolStream } from "./pool-stream.js";
 import { momentumExit, momentumSize } from "./momentum.js";
 import { fullRugCheck } from "./trojan-security.js";
 import { analyzeEntryRoute } from "./trojan-entry.js";
 import { verifyPools, verifyPoolReserves, estimateBinSwap, estimateTickSwap } from "./trojan-pools.js";
-import { CandidateQueue, marketBatch, sourcesFor, watchPumpPortal } from "./trojan-discovery.js";
+import { CandidateQueue, marketBatch, invalidateMarket, sourcesFor, watchPumpPortal } from "./trojan-discovery.js";
 
 export const scanLimit = 12;
 const batchLimit = 30;
 const maxTickAge = 20000;
+const paperExecutionDelay = 1000;
 export const scanKey = "scan-portfolio";
 const classicTokenProgram = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const day = at => Math.floor(at / 86400000);
@@ -244,11 +247,36 @@ export function technicalEntry(engine, candles) {
 }
 
 export async function runScanner({ engine, policy, rules, timeframe, copyWallets, birdeyeKey,
-    signal, load, commit, report, telemetry, event, jupiterKey, simulationWallet }) {
+    signal, load, commit, report, telemetry, event, diagnostic, jupiterKey, simulationWallet }) {
   const queue = new CandidateQueue();
   const analyzeInWorker = analystWorker(signal);
   const scanProfile = policy.strategy === 6 ? "sniper" : undefined;
-  const sources = sourcesFor(birdeyeKey).map(source => ({ ...source, due: 0, failures: 0 }));
+  const momentum = policy.strategy === 8;
+  const tape = momentum ? marketTape(signal) : undefined;
+  const watched = new Map();
+  const heldPools = new Set();
+  let poolEventAt = 0;
+  let streamWake;
+  let approvalVersion = 0;
+  function nextEntryAt(tick) {
+    const ready = tick.signalAt + paperExecutionDelay;
+    return Number.isFinite(ready) && ready < tick.routeExpires ? ready : Infinity;
+  }
+  let poolStatus = "odottaa poolia";
+  const startPoolStream = momentum ? poolStream(signal, pool => {
+    const row = watched.get(pool);
+    const now = Date.now();
+    if (row && now - row.last >= 4500) {
+      row.last = now;
+      invalidateMarket(row.item.token, signal, now);
+      wake(row.item, 100);
+    }
+    if (heldPools.has(pool) && now - poolEventAt >= 1500) {
+      poolEventAt = now;
+      streamWake?.();
+    }
+  }, status => { poolStatus = status; }) : () => {};
+  const sources = sourcesFor(birdeyeKey, tape).map(source => ({ ...source, due: 0, failures: 0 }));
   const histories = new Map();
   const mintCache = new Map();
   const rugCache = new Map();
@@ -327,14 +355,19 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
       averageDiscoveryMs: Math.round(discoveryMs / (discoverySamples || 1)), tradeCount, lastFill,
       pump, sourceError, reasons: [...reasons].sort((a, b) => b[1] - a[1]).slice(0, 8),
       sources: sources.map(source => ({ name: source.name, count: source.count, busy: Boolean(source.busy), error: source.error })),
-      apis: { "DEX": at < marketCooldown ? "Tauolla" : "Valmis", "RugCheck": at < rugCooldown ? "Tauolla" : rugActive ? "Haetaan" : "Valmis",
+      apis: { "Pool WebSocket": poolStatus, "DEX": at < marketCooldown ? "Tauolla" : "Valmis", "RugCheck": at < rugCooldown ? "Tauolla" : rugActive ? "Haetaan" : "Valmis",
         "Solana RPC": mintPending.size || poolPending.size ? "Tarkistetaan" : "Valmis", "Jupiter": routeActive ? "Haetaan" : "Valmis" }
     });
   };
   watchPumpPortal(signal, mint => add([mint], "PumpPortal"), status => {
     pump = status;
     show();
-  });
+  }, momentum ? mint => {
+    add([mint], "PumpPortal");
+    const item = queue.sniperItems.get(mint) ?? queue.items.get(mint);
+    if (item) wake(item, 100);
+    diagnostic?.({ token: mint, stage: "stream", outcome: "migration" });
+  } : undefined);
 
   async function discover() {
     while (!signal.aborted) {
@@ -374,6 +407,20 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
     }
   }
 
+  async function pricesWithFallback(markets) {
+    if (!tape || !markets.length) return scanPrices(markets, signal);
+    let prices = [];
+    let failure;
+    try { prices = await scanPrices(markets, signal); }
+    catch (error) { failure = error; }
+    const found = new Set(prices.map(positionKey));
+    const missing = markets.filter(market => !found.has(positionKey(market)));
+    try { prices.push(...await tape.poolPrices(missing)); }
+    catch (error) { failure ??= error; }
+    if (!prices.length && failure) throw failure;
+    return prices;
+  }
+
   const wake = (item, delay = 500) => {
     if (!item.inFlight && !signal.aborted) item.due = Math.min(item.due, Date.now() + delay);
   };
@@ -383,6 +430,18 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
       const markets = await marketBatch(batch.map(item => item.token), signal);
       if (signal.aborted) return;
       const now = Date.now();
+      if (tape) {
+        for (const item of batch) {
+          const primary = markets.get(item.token);
+          const alternate = preferMarket(primary, tape.get(item.token), now);
+          if (alternate) markets.set(item.token, alternate);
+        }
+        const needsData = batch.find(item => tape.canRefresh(item.token) && !completeTape(markets.get(item.token)) &&
+          (item.sources.has("PumpPortal") || markets.has(item.token)));
+        if (needsData) void tape.refresh(needsData.token).then(() => {
+          if (Date.now() - (tape.get(needsData.token)?.observedAt ?? 0) < 2000) wake(needsData);
+        }).catch(error => { if (!signal.aborted) sourceError = `GeckoTerminal: ${error.message}`; });
+      }
       const inputs = batch.map(item => ({
         token: item.token, raw: markets.get(item.token)?.raw, sources: [...item.sources]
       }));
@@ -406,9 +465,21 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
       for (const cache of [mintCache, rugCache, routeCache]) {
         for (const [token, value] of cache) if (value.expires <= now) cache.delete(token);
       }
+      if (momentum) {
+        for (const row of ranked) {
+          if (!row.pair || !(row.decision === "approve" || row.strategy?.code === "score")) continue;
+          const pool = row.pair.market.pool;
+          const previous = watched.get(pool);
+          watched.delete(pool);
+          watched.set(pool, { item: row.item, last: previous?.last ?? 0, seen: now });
+        }
+        for (const [pool, row] of watched) if (now - row.seen > 30000) watched.delete(pool);
+        while (watched.size > 24) watched.delete(watched.keys().next().value);
+        startPoolStream([...heldPools, ...[...watched.keys()].reverse()]);
+      }
       const possible = ranked.filter(row => row.decision === "approve").sort((a,b)=>((b.strategy?.score??0)+(b.profile==="sniper"?12:0))-((a.strategy?.score??0)+(a.profile==="sniper"?12:0)));
       for(const [key,value] of poolCache)if(value.expires<=Date.now())poolCache.delete(key);
-      const poolJobs=policy.strategy>=5?possible.filter(({pair})=>!poolCache.has(positionKey(pair.market))&&!poolPending.has(positionKey(pair.market))).slice(0,Math.max(0,2-poolActive)):[];
+      const poolJobs=policy.strategy>=5?possible.filter(({pair, item})=> (!momentum || (mintCache.get(item.token)?.ok && rugCache.get(item.token)?.ok)) && !poolCache.has(positionKey(pair.market))&&!poolPending.has(positionKey(pair.market))).slice(0,Math.max(0,2-poolActive)):[];
       void Promise.all(poolJobs.map(async ({pair, item})=>{
         const market=pair.market,key=positionKey(market);poolPending.add(key);poolActive++;
         try{let [pool]=await verifyPools([market],signal);if(pool.status==="approve")pool={...pool,...await verifyPoolReserves(market,signal)};poolCache.set(key,{...pool,expires:Date.now()+8000});}
@@ -461,14 +532,14 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
             const pool = poolCache.get(positionKey(market));
             if(!pool || pool.expires<=Date.now())throw new Error("Poolitarkistus vanhentui");
             if (pool.status !== "approve") {
-              routeCache.set(positionKey(market), { ...pool, expires: Date.now() + 30000 });
+              routeCache.set(positionKey(market), { ...pool, stage: "pool", expires: Date.now() + 30000 });
             } else {
               if (!solQuote || Date.now() - solQuote.at > 15000) solQuote = await currentMarket(signal);
               const orderUsd = policy.strategy === 8 ? Math.min(policy.momentumMaxUsd, policy.orderUsd)
                 : strategySettings(policy, next.profile === "sniper" ? 6 : 5).orderUsd;
               const depth = assessEntryDepth(pool,market,orderUsd,solQuote.price,policy[next.profile+"MaxImpact"]??5);
               if(depth.status==="reject"||depth.status==="watch"){
-                routeCache.set(positionKey(market),{...depth,expires:Date.now()+15000});
+                routeCache.set(positionKey(market),{...depth,stage:"pool",expires:Date.now()+15000});
               } else {
               const route = await analyzeEntryRoute(market.token, orderUsd, {
                 signal, solUsd: solQuote.price, apiKey: jupiterKey, taker: simulationWallet || undefined,
@@ -477,7 +548,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
               routeCache.set(positionKey(market), { status: route.allowed ? "approve" : "reject",
                 entryImpactPct: route.impact,
                 reason: `${pool.protocol} · ${depth.reason} · ${route.reason} (${route.score}/100)${route.simulation ? ` · simulaatio ${route.simulation}` : ""}`,
-                expires: Date.now() + (route.allowed ? 8000 : 30000) });
+                checkedAt: Date.now(), expires: Date.now() + (route.allowed ? 8000 : 30000) });
               }
             }
           } catch (error) {
@@ -499,16 +570,22 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         const cachedRoute = pair && policy.strategy >= 5 ? routeCache.get(positionKey(pair.market)) : null;
         const route = cachedRoute?.expires > Date.now() ? cachedRoute : null;
         let checked = decision;
+        let stage = pair ? "momentum" : "market";
         let reason = strategy?.reason ?? (pair ? "Markkinadata tarkistettu" : "Poolin hintadata puuttuu");
         if (decision === "approve") {
-          if (authority === false) { checked = "reject"; reason = "Mintin omistaja tai minttaus-/jäädytysvaltuus"; }
-          else if (rug === false) { checked = "reject"; reason = report.reason || "RugCheck hylkäsi"; }
-          else if (authority !== true || rug !== true) { checked = "watch"; reason = report?.reason || "Odotetaan turvallisuustarkistusta"; }
+          if (authority === false) { stage = "mint"; checked = "reject"; reason = "Mintin omistaja tai minttaus-/jäädytysvaltuus"; }
+          else if (rug === false) { stage = "rug"; checked = "reject"; reason = report.reason || "RugCheck hylkäsi"; }
+          else if (authority !== true || rug !== true) { stage = authority !== true ? "mint" : "rug"; checked = "watch"; reason = report?.reason || "Odotetaan turvallisuustarkistusta"; }
           else if (policy.strategy >= 5) {
+            const pool = poolCache.get(positionKey(pair.market));
+            stage = route ? (route.stage ?? (route.status === "approve" ? "eligible" : "route")) : pool?.status === "approve" ? "route" : "pool";
             checked = route?.status === "unsupported" ? "watch" : route?.status ?? "watch";
-            reason = route?.reason ?? "Odotetaan pooli- ja Jupiter-analyysiä";
+            reason = route?.reason ?? (pool?.status !== "approve" && pool?.reason) ?? "Odotetaan pooli- ja Jupiter-analyysiä";
+            if (reason === false) reason = "Odotetaan Jupiter-tarjousta";
           }
         } else if (quality?.tier === "reject") reason = "Virheellinen markkinadata";
+        if (momentum) diagnostic?.({ token: item.token, stage, outcome: checked, reason,
+          strategyCode: strategy?.code, score: strategy?.score, provider: pair?.provider ?? (pair ? "DEX Screener" : null) });
         if (!item.attempts) {
           discoverySamples++;
           discoveryMs += Date.now() - item.seen;
@@ -527,12 +604,17 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         }
         if (checked === "approve") {
           if (route) item.due = Math.min(item.due, route.expires);
-          candidates.push({ ...pair.market, score: strategy?.score, analysisReason: strategy?.reason, verification: reason, tradeStrategy: policy.strategy === 8 ? 8 : policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: pair.observedAt, priority: item.priority, routeExpires: route?.expires, entryImpactPct: route?.entryImpactPct });
+          candidates.push({ ...pair.market, score: strategy?.score, analysisReason: strategy?.reason, verification: reason, tradeStrategy: policy.strategy === 8 ? 8 : policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: pair.observedAt, priority: item.priority, routeExpires: route?.expires, signalAt: route?.checkedAt, entryImpactPct: route?.entryImpactPct });
         }
       }
+      const previousApproval = new Map(approvedTicks.map(tick => [positionKey(tick), tick.signalAt]));
       approvedTicks = [...candidates, ...approvedTicks.filter(tick => !batch.some(item => item.token === tick.token))]
         .filter(tick => now - tick.at <= maxTickAge)
         .sort((a, b) => b.priority - a.priority).slice(0, 120);
+      if (momentum && candidates.some(tick => previousApproval.get(positionKey(tick)) !== tick.signalAt)) {
+        approvalVersion++;
+        streamWake?.();
+      }
     } catch (error) {
       if (!signal.aborted) {
         sourceError = `Analyysihaku: ${error.message}`;
@@ -606,9 +688,13 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
   async function positions() {
     let failures = 0;
     while (!signal.aborted) {
+      const cycleApproval = approvalVersion;
       try {
         const portfolio = await load();
         const held = Object.values(portfolio.positions).map(position => position.market);
+        heldPools.clear();
+        for (const market of held) heldPools.add(market.pool);
+        if (momentum) startPoolStream([...heldPools, ...[...watched.keys()].reverse()]);
         for(const [key,value] of sellPoolCache)if(value.expires<=Date.now())sellPoolCache.delete(key);
         for(const market of held.filter(m=>m.quoteToken&&!sellPoolCache.has(positionKey(m))&&!sellPoolPending.has(positionKey(m))).slice(0,Math.max(0,2-sellPoolPending.size))){
           const key=positionKey(market);sellPoolPending.add(key);
@@ -619,19 +705,14 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           (tick.routeExpires === undefined || now <= tick.routeExpires));
         for (const [key, at] of usedPrices) if (now - at > maxTickAge) usedPrices.delete(key);
         const limit = policy.maxPools ?? scanLimit;
-        const selected = universe(portfolio, candidates, limit);
-        const heldKeys = new Set(held.map(positionKey));
-        const tracked = new Set(selected.map(positionKey));
+
         const candidateByPool = new Map(candidates.map(item => [positionKey(item), item]));
         const candidateTokens = new Set(candidates.map(item => item.token));
-        const active = tracked;
-        for (const cache of [histories, candles]) {
-          for (const key of cache.keys()) if (!active.has(key)) cache.delete(key);
-        }
+
         let prices = [];
         let priceError;
         try {
-          prices = await scanPrices(held, signal);
+          prices = await pricesWithFallback(held);
         } catch (error) {
           priceError = error;
         }
@@ -642,8 +723,35 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
           const exitAt = Math.max(Date.now(), (portfolio.lastScanAt ?? 0) + 1);
           exitBook = await commit(prices.filter(t=>exitAt>=t.at&&exitAt-t.at<=maxTickAge).map(t=>({...t,sellPool:sellPoolCache.get(positionKey(t)),observedAt:t.at,at:exitAt,exitsOnly:true})),()=>0,()=>false);
         }
+        // Recompute available slots after risk exits so a different token can use the freed capital in this cycle.
+        const currentBook = exitBook ?? portfolio;
+        const heldKeys = new Set(Object.keys(currentBook.positions));
+        const tracked = new Set(universe(currentBook, candidates, limit).map(positionKey));
+        for (const cache of [histories, candles]) {
+          for (const key of cache.keys()) if (!tracked.has(key)) cache.delete(key);
+        }
+        const justExited = new Set(held.filter(market => !heldKeys.has(positionKey(market))).map(market => market.token));
         const ticks = [...(policy.strategy>=5&&!rules&&!copyWallets?.length?[]:prices), ...candidates.filter(tick => tracked.has(positionKey(tick)) &&
-          !heldKeys.has(positionKey(tick)) && usedPrices.get(positionKey(tick)) !== tick.at)];
+          !heldKeys.has(positionKey(tick)) && !justExited.has(tick.token) && usedPrices.get(positionKey(tick)) !== tick.at)];
+        if (momentum && ticks.length) {
+          const entries = ticks.filter(tick => Date.now() >= nextEntryAt(tick) && Date.now() < tick.routeExpires);
+          ticks.length = 0;
+          if (entries.length) {
+            try {
+              const refreshed = await pricesWithFallback(entries);
+              const byKey = new Map(refreshed.map(tick => [positionKey(tick), tick]));
+              for (const signalTick of entries) {
+                const current = byKey.get(positionKey(signalTick));
+                if (current && current.price <= signalTick.price * 1.01 && current.at <= signalTick.routeExpires) {
+                  ticks.push({ ...signalTick, ...current });
+                } else diagnostic?.({ token: signalTick.token, stage: "execution", outcome: "watch",
+                  reason: "Tuore hinta puuttuu, ostohinta karkasi tai reitti vanheni" });
+              }
+            } catch (error) {
+              if (!signal.aborted) sourceError = `Toteutushinta: ${error.message}`;
+            }
+          }
+        }
         const at = Math.max(Date.now(), (exitBook?.lastScanAt ?? portfolio.lastScanAt ?? 0) + 1);
         const fresh = ticks.filter(tick => at >= tick.at && at - tick.at <= maxTickAge);
         for (const tick of fresh) {
@@ -685,6 +793,9 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         // Risk exits use fresh prices immediately, independent of discovery/safety I/O.
         if (signal.aborted) return;
         const copy = Date.now() - copyAt <= 20000 ? copySignals : new Map();
+        for (const tick of fresh) if (momentum && decisions.get(positionKey(tick)) === 0) {
+          diagnostic?.({ token: tick.token, stage: "technical", outcome: "watch", reason: "Moniaikavälivahvistus" });
+        }
         const updated = await commit(fresh.map(tick => ({
           ...tick, observedAt: tick.at, at,
           tradeStrategy: candidateByPool.get(positionKey(tick))?.tradeStrategy,
@@ -707,6 +818,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
             usedPrices.set(positionKey(tick), tick.at);
           }
         }
+        if (momentum) for (const decision of updated.decisions ?? []) {
+          if (decision.at !== at) break;
+          if (decision.status === "REJECT") diagnostic?.({ token: decision.mint, stage: "portfolio",
+            outcome: "reject", reason: decision.reason });
+        }
         if (copy === copySignals && fresh.length) copySignals = new Map();
         if (signal.aborted) return;
         tradeCount = updated.totalTrades ?? updated.trades.length;
@@ -723,7 +839,22 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         report(`Skannaus yrittää uudelleen: ${error.message}`);
         failures++;
       }
-      await pause(failures ? Math.min(60000, 3000 * 2 ** Math.min(failures, 5)) : 3000, signal);
+      if (momentum && !failures && approvalVersion !== cycleApproval) continue;
+      const interval = failures ? Math.min(60000, 3000 * 2 ** Math.min(failures, 5)) : 3000;
+      if (!momentum || failures || signal.aborted) await pause(interval, signal);
+      else {
+        const wait = new AbortController();
+        streamWake = () => wait.abort();
+        signal.addEventListener("abort", streamWake, { once: true });
+        const now = Date.now();
+        const next = approvedTicks.reduce((soonest, tick) => {
+          const ready = nextEntryAt(tick);
+          return ready > now ? Math.min(soonest, ready) : soonest;
+        }, now + interval);
+        await pause(next - now, wait.signal);
+        signal.removeEventListener("abort", streamWake);
+        streamWake = undefined;
+      }
     }
   }
 

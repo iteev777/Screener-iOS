@@ -716,6 +716,7 @@ async function renderMode() {
   byId("quote-result").textContent = "";
   byId("home-equity").closest("section").hidden = isLive;
   byId("home-metrics").hidden = isLive;
+  byId("home-activity").hidden = isLive;
   byId("scan-positions").closest("section").hidden = isLive;
   if (isLive) {
     renderLive();

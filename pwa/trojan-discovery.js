@@ -24,7 +24,7 @@ function metadata(row) {
     priceUsd: row?.usdPrice ?? row?.priceUsd, liquidityUsd: row?.liquidity_usd ?? row?.liquidity,
     marketCap: row?.mcap ?? row?.marketCap, fdv: row?.fdv, volume24h: row?.volume_24h_usd ?? row?.v24hUSD };
 }
-export function sourcesFor(birdeyeKey) {
+export function sourcesFor(birdeyeKey, tape) {
   const sources = endpoints.map(([name, path, interval]) => ({ name, interval, load: async signal => {
     const rows = await fetchJson(dex + path, {}, signal);
     if (!Array.isArray(rows)) throw new Error("Virheellinen syöte");
@@ -32,7 +32,8 @@ export function sourcesFor(birdeyeKey) {
   } }));
   for (const feed of ["new_pools", "trending_pools"]) {
     sources.push({ name: `GeckoTerminal ${feed}`, interval: 30000,
-      load: async signal => (await discoverMarkets(feed, { liquidity: 0, volume: 0 }, signal)).map(row => ({...metadata(row),token:row.token})) });
+      load: async signal => tape ? (await tape.feed(feed)).map(({ market }) => ({...metadata(market), token: market.token}))
+        : (await discoverMarkets(feed, { liquidity: 0, volume: 0 }, signal)).map(row => ({...metadata(row),token:row.token})) });
   }
   if (birdeyeKey) sources.push({ name: "Birdeye", interval: 60000, load: async signal => {
     const base = "https://public-api.birdeye.so/defi";
@@ -73,6 +74,11 @@ export function sourcesFor(birdeyeKey) {
 }
 
 const marketCaches=new WeakMap();
+export function invalidateMarket(token, signal, at) {
+  const cache = marketCaches.get(signal);
+  const entry = cache?.get(token);
+  if (entry?.value && at - entry.value.observedAt >= 3000) cache.delete(token);
+}
 export async function marketBatch(tokens, signal) {
   if (!tokens.length || tokens.length > 30 || tokens.some(token => typeof token !== "string" || !address.test(token))) {
     throw new Error("Virheellinen minttien erähaku");
@@ -97,7 +103,7 @@ export async function marketBatch(tokens, signal) {
   return best;
 }
 
-export function watchPumpPortal(signal, emit, status) {
+export function watchPumpPortal(signal, emit, status, migrate) {
   if (signal.aborted) return;
   let socket;
   let retry;
@@ -111,11 +117,13 @@ export function watchPumpPortal(signal, emit, status) {
       clearTimeout(timer);
       status("yhdistetty");
       socket.send(JSON.stringify({ method: "subscribeNewToken" }));
+      if (migrate) socket.send(JSON.stringify({ method: "subscribeMigration" }));
     };
     socket.onmessage = event => {
       if (signal.aborted || typeof event.data !== "string" || event.data.length > 8192) return;
       try {
         const row = JSON.parse(event.data);
+        if (migrate && row?.txType === "migration" && address.test(row.mint ?? "")) { migrate(row.mint); return; }
         if (typeof row?.mint === "string" && address.test(row.mint) &&
             (row.txType === undefined || row.txType === "create")) {
           failures = 0;

@@ -8,7 +8,7 @@ import { candidateQuality, trojanDecision } from "./trojan-analysis.js";
 const strategy = Number(process.env.SCREENER_BENCH_STRATEGY ?? 8);
 if (![5, 6, 7, 8].includes(strategy)) throw new Error("Use strategy 5, 6, 7, or 8.");
 const duration = Math.max(900, Number(process.env.SCREENER_BENCH_SECONDS ?? 905));
-if (!Number.isSafeInteger(duration) || duration > 3600) throw new Error("Duration must be 900–3600 seconds.");
+if (!Number.isSafeInteger(duration) || duration > 7200) throw new Error("Duration must be 900–7200 seconds.");
 const policy = { ...defaults, strategy };
 const { instance: { exports: engine } } = await WebAssembly.instantiate(
   readFileSync(new URL("./engine.wasm", import.meta.url)));
@@ -44,10 +44,54 @@ let next = started;
 let totalPump = 0;
 let maxQueue = 0;
 let peakWorkers = 0;
+const stages = new Map();
+const outcomes = new Map();
+const calibration = new Map();
+const closed = [];
+const positionResults = new Map();
+let processed = 0;
+let fees = 0;
+let delay = 0;
+let delayedEntries = 0;
+let peakEquity = policy.paperCapital;
+let maxDrawdown = 0;
+const equity = () => book.cash + Object.values(book.positions).reduce((sum, row) => sum + row.sol * row.mark, 0);
+function recordPaper() {
+  const newCount = (book.totalTrades ?? 0) - processed;
+  for (const trade of book.trades.slice(0, newCount).reverse()) {
+    fees += trade.feeUsd;
+    if (trade.side === "Osto" && Number.isFinite(trade.executionDelayMs)) { delay += trade.executionDelayMs; delayedEntries++; }
+    if (trade.side !== "Myynti") continue;
+    const result = (positionResults.get(trade.token) ?? 0) + trade.realizedPnl;
+    if (trade.closed) {
+      closed.push({ pnl: result, heldMs: trade.heldMs });
+      positionResults.delete(trade.token);
+    } else positionResults.set(trade.token, result);
+  }
+  processed += newCount;
+  const value = equity();
+  peakEquity = Math.max(peakEquity, value);
+  maxDrawdown = Math.max(maxDrawdown, (peakEquity - value) / peakEquity);
+}
 const log = value => console.log(JSON.stringify(value));
 try {
   await runScanner({ engine, policy, timeframe: "1m", signal: controller.signal, load: async () => book,
-    commit: async (ticks, decide, eligible) => advancePortfolio(book, ticks, engine, policy, decide, eligible),
+    commit: async (ticks, decide, eligible) => {
+      advancePortfolio(book, ticks, engine, policy, decide, eligible);
+      recordPaper();
+      return book;
+    },
+    diagnostic({ token, stage, outcome, reason, score, strategyCode }) {
+      const bucket = `${stage}/${outcome}`;
+      if (!stages.has(bucket)) stages.set(bucket, new Set());
+      stages.get(bucket).add(token);
+      if (outcome !== "approve" && reason) {
+        const key = `${bucket}: ${reason}`;
+        if (!outcomes.has(key)) outcomes.set(key, new Set());
+        outcomes.get(key).add(token);
+      }
+      if (["signal", "score"].includes(strategyCode)) calibration.set(token, Math.max(score, calibration.get(token) ?? 0));
+    },
     report: (_, portfolio) => { if (portfolio) book = portfolio; },
     event: event => { if (event.status === "found" && event.reason === "PumpPortal") totalPump++; },
     telemetry(stats) {
@@ -72,4 +116,12 @@ if (process.env.SCREENER_BENCH_PAIRS) {
   }
 }
 log({ final: true, strategy, seconds: (Date.now() - started) / 1000, last, totalPump, peakWorkers, maxQueue,
-  trades: book.totalTrades ?? 0, cash: book.cash, realized: book.realized, samples: pairs.size, http: Object.fromEntries(http) });
+  stages: Object.fromEntries([...stages].map(([key, tokens]) => [key, tokens.size])),
+  topReasons: [...outcomes].map(([key, tokens]) => [key, tokens.size]).sort((a, b) => b[1] - a[1]).slice(0, 30),
+  thresholds: Object.fromEntries([70, 72, 76, 80, 84, 88].map(threshold =>
+    [threshold, [...calibration.values()].filter(score => score >= threshold).length])),
+  trades: book.totalTrades ?? 0, closed: closed.length, open: Object.keys(book.positions).length,
+  winRate: closed.length ? closed.filter(position => position.pnl > 0).length / closed.length : null,
+  averageHoldMs: closed.length ? closed.reduce((sum, position) => sum + position.heldMs, 0) / closed.length : null,
+  equity: equity(), netReturn: equity() / policy.paperCapital - 1, maxDrawdown, fees,
+  averageEntryDelayMs: delayedEntries ? delay / delayedEntries : null, cash: book.cash, realized: book.realized, samples: pairs.size, http: Object.fromEntries(http) });

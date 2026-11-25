@@ -7,10 +7,10 @@ function show(view) {
   }
   for (const button of nav.querySelectorAll("button")) button.setAttribute("aria-pressed", String(button.dataset.view === view));
 }
-nav.addEventListener("click", event => {
-  const button = event.target.closest("button[data-view]");
+document.addEventListener("click", event => {
+  const button = event.target.closest("button[data-view], button[data-open-view]");
   if (button) {
-    show(button.dataset.view);
+    show(button.dataset.view ?? button.dataset.openView);
     window.scrollTo(0, 0);
   }
 });

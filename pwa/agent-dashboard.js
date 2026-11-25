@@ -24,13 +24,31 @@ export function equityDashboard(portfolio, equity) {
     element(id).classList.toggle("positive", delta > 0);
     element(id).classList.toggle("negative", delta < 0);
   }
+  drawEquity(portfolio.history ?? []);
+}
+
+const range = element("equity-range");
+let equityHistory = [];
+let rangeHours = 0;
+range.addEventListener("click", event => {
+  const button = event.target.closest("button[data-equity-hours]");
+  if (!button) return;
+  rangeHours = Number(button.dataset.equityHours);
+  for (const option of range.querySelectorAll("button")) option.setAttribute("aria-pressed", String(option === button));
+  drawEquity(equityHistory);
+});
+
+function drawEquity(history) {
+  equityHistory = history;
   const canvas = element("equity-chart");
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
-  const points = portfolio.history ?? [];
+  const since = Date.now() - rangeHours * 3600000;
+  const points = rangeHours ? history.filter(row => row.at >= since) : history;
   canvas.hidden = !points.length;
-  const key = points.at(-1)?.at ?? "empty";
-  if (canvas.dataset.asOf === String(key)) return;
+  element("equity-empty").hidden = Boolean(points.length);
+  const key = `${rangeHours}:${points.length}:${points.at(-1)?.at ?? "empty"}`;
+  if (canvas.dataset.asOf === key) return;
   canvas.dataset.asOf = key;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!points.length) return;
@@ -38,7 +56,8 @@ export function equityDashboard(portfolio, equity) {
   const high = Math.max(...points.map(row => row.equity));
   const from = points[0].at;
   const span = Math.max(1, points.at(-1).at - from);
-  ctx.strokeStyle = change < 0 ? "#fb7185" : "#63e6ae";
+  const color = points.at(-1).equity < points[0].equity ? "#fb7185" : "#57e5ad";
+  ctx.strokeStyle = color;
   ctx.lineWidth = 3;
   ctx.beginPath();
   for (const [i, row] of points.entries()) {
@@ -49,6 +68,14 @@ export function equityDashboard(portfolio, equity) {
     if (points.length === 1) ctx.lineTo(canvas.width - 8, y);
   }
   ctx.stroke();
+  const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  gradient.addColorStop(0, color + "38");
+  gradient.addColorStop(1, color + "00");
+  ctx.lineTo(points.length === 1 ? canvas.width - 8 : 8 + (points.at(-1).at - from) / span * (canvas.width - 16), canvas.height);
+  ctx.lineTo(8, canvas.height);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
 }
 
 function decisionLabel(row) {
@@ -85,8 +112,12 @@ export function showAgents(stats, activity) {
     ["EXECUTOR", stats.lastFill || "Odottaa toimeksiantoa", stats.tradeCount, "Kirjaa toteutuneet paperikaupat", activity.get("fill")],
     ["RISK", `${stats.rejected} hylättyä · ${stats.waiting} odottaa`, stats.rejected, "Valvoo tuoreutta, altistusta ja turvallisuutta", activity.get("risk")]
   ];
-  const target = element("agent-cards");
-  if (!target.children.length) {
+  for (const target of [element("agent-cards"), element("home-agents")]) renderAgents(target, data, stats, activity);
+}
+
+function renderAgents(target, data, stats, activity) {
+  if (target.childElementCount !== data.length) {
+    target.replaceChildren();
     for (const [name] of data) {
       const card = document.createElement("article");
       const heading = document.createElement("h3");
@@ -110,4 +141,7 @@ export function showAgents(stats, activity) {
 
 export function renderFeed(rows) {
   element("agent-feed").replaceChildren(...eventRows(rows.slice(0, 45)));
+  const preview = rows.filter(row => !["found", "watch", "reject", "HOLD", "REJECT"].includes(row.status)).slice(0, 4);
+  element("home-feed").replaceChildren(...eventRows(preview));
+  element("home-feed-empty").hidden = Boolean(preview.length);
 }

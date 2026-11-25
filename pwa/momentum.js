@@ -17,25 +17,42 @@ function tape(row) {
 
 export function momentumEntry(pair, sources, threshold, now) {
   const quality = candidateQuality(pair, sources, now);
-  const metrics = tape({ volume5: pair.volume?.m5, volumeHour: pair.volume?.h1,
+  const volume5 = pair.volume?.m5;
+  const volumeHour = pair.volume?.h1;
+  const metrics = tape({ volume5, volumeHour,
     change5: pair.priceChange?.m5, changeHour: pair.priceChange?.h1, transactions: pair.txns });
-  if (quality.tier === "reject") return { decision: "reject", score: 0, reason: "Virheellinen markkinadata" };
-  if ([pair.volume?.m5, pair.volume?.h1].some(value => finite(value) && value < 0) ||
-      [metrics.move, metrics.hour].some(value => finite(value) && value < -100)) {
-    return { decision: "reject", score: 0, reason: "Virheellinen volyymi tai hintamuutos" };
-  }
-  if ([metrics.buying, metrics.acceleration, metrics.move, metrics.hour].some(value => !finite(value))) {
-    return { decision: "watch", score: quality.score, reason: "Odotetaan 5 min ostopainetta, volyymia ja trendiä" };
-  }
-  const score = Math.round(clamp(quality.score * .55 + metrics.buying * 20 +
-    Math.min(metrics.acceleration, 3) / 3 * 15 + (metrics.move > 0 && metrics.hour > 0 ? 10 : 0), 0, 100));
-  if (metrics.move > 20 || metrics.hour < -25 || metrics.hour > 75) {
-    return { decision: "reject", score, reason: "Liian voimakas hintaliike tai laskeva tuntitrendi" };
-  }
-  if (score < threshold || metrics.move <= 0 || metrics.buying < .58 || metrics.acceleration < 1.2 || metrics.hour < -3) {
-    return { decision: "watch", score, reason: "Momentum, ostopaine tai volyymin kiihtyminen ei täytä ehtoja" };
-  }
-  return { decision: "approve", score, reason: `Markkinalaatu ${quality.score}/100 · ostopaine ${Math.round(metrics.buying * 100)} % · volyymitahti ${metrics.acceleration.toFixed(1)}× · 5 min ${metrics.move.toFixed(1)} %` };
+  const result = (decision, code, reason, score = 0) => ({ decision, code, reason, score });
+  if (quality.tier === "reject" || [volume5, volumeHour].some(v => finite(v) && v < 0) ||
+      [metrics.move, metrics.hour].some(v => finite(v) && v < -100))
+    return result("reject", "invalid", "Virheellinen markkinadata");
+  if (![metrics.move, volume5].every(finite))
+    return result("watch", "missing-tape", "5 min hinta tai volyymi puuttuu");
+  const flow = pair.txns?.m5;
+  if (!Number.isSafeInteger(flow?.buys) || !Number.isSafeInteger(flow?.sells))
+    return result("watch", "missing-flow", "5 min kauppamäärät puuttuvat");
+  if (flow.buys + flow.sells < 5)
+    return result("watch", "thin-flow", "Alle viisi kauppaa viimeisen 5 min aikana");
+  if (metrics.move > 20 || metrics.hour < -25 || metrics.hour > 75)
+    return result("reject", "extended", "Liian voimakas hintaliike tai laskeva tuntitrendi");
+  const age = (now - pair.pairCreatedAt) / 60000;
+  const young = Number.isFinite(age) && age >= 5 && age < 60;
+  const prior = finite(volumeHour) && volumeHour >= volume5 ? volumeHour - volume5 : null;
+  const baseline = prior && prior > 0 ? prior / (young ? age - 5 : 55) : null;
+  const acceleration = baseline > 0 ? volume5 / 5 / baseline : null;
+  const strongYoungTape = young && volume5 >= Math.max(1000, pair.liquidity.usd * .04) &&
+    flow.buys + flow.sells >= 12 && metrics.buying >= .65;
+  if ((!finite(metrics.hour) || !finite(acceleration)) && !strongYoungTape)
+    return result("watch", "missing-baseline", "Volyymin vertailujakso tai tuntitrendi puuttuu");
+  const score = Math.round(clamp(quality.score * .45 + metrics.buying * 25 +
+    (finite(acceleration) ? Math.min(acceleration, 3) * 5 : 8) +
+    (metrics.move > 0 ? 10 : 0) + (metrics.hour > 0 ? 5 : 0), 0, 100));
+  if (metrics.move <= 0) return result("watch", "no-rebound", "5 min hintasuunta ei ole positiivinen", score);
+  if (metrics.buying < .58) return result("watch", "buy-pressure", "Heikko 5 min ostopaine", score);
+  if (finite(acceleration) && acceleration < 1.2 || metrics.hour < -3)
+    return result("watch", "weak-momentum", "Volyymin kiihtyminen tai tuntitrendi on heikko", score);
+  if (score < threshold) return result("watch", "score", "Momentumin pisteraja ei täyty", score);
+  return result("approve", "signal",
+    `Markkinalaatu ${quality.score}/100 · ostopaine ${Math.round(metrics.buying * 100)} % · 5 min ${metrics.move.toFixed(1)} %`, score);
 }
 
 export function momentumSize(cash, score, liquidity, policy) {
@@ -72,8 +89,12 @@ export function momentumExit(book, tick, policy) {
     return exit(2, "Break-even-suoja");
   if ((1 - tick.price / peak) * 100 >= distance) return exit(3, "Volatiliteettiin mukautettu trailing stop");
   if (at >= policy.holdMinutes * 60000) return exit(4, "Enimmäispitoaika");
-  if (weak && move >= policy.profit && !book.profitTaken && policy.profitShare < 100)
-    return exit(5, "Momentum heikkeni voitollisessa positiossa", policy.profitShare / 100);
+  const partial = policy.momentumProfitShare ?? 50;
+  const costFloor = (policy.feeBps + policy.slippageBps) / 100;
+  if (weak && move >= Math.max(policy.profit, costFloor + 1) && !book.profitTaken)
+    return exit(5, "Momentum heikkeni voitollisessa positiossa", partial / 100);
+  if (book.profitTaken && weak && move >= policy.finalProfit)
+    return exit(5, "Jäljellä olevan osuuden voitto kotiutettu");
   if (weak && finite(short) && short < 0 && finite(buying) && buying < .45 && !confirmed)
     return exit(9, "Negatiivinen momentum ja kasvava myyntipaine");
 }
