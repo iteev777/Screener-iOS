@@ -26,10 +26,10 @@ const day = at => Math.floor(at / 86400000);
 export const positionKey = market => `${market.token}:${market.pool}`;
 const poolTokenDecimals = (depth, token) => depth?.tokenDecimals ??
   (depth?.baseMint===token ? depth.base?.decimals : depth?.quoteMint===token ? depth.quote?.decimals : undefined);
-function routeMatchesMarket(route, market, depth) {
+function routeEntryPrice(route, market, depth) {
   const decimals=poolTokenDecimals(depth,market.token);
   const quotePrice=Number(route.proof?.inLamports)*route.solUsd/1e9/(Number(route.proof?.tokenRaw)/10**decimals);
-  return quotePrice>0 && Number.isFinite(quotePrice) && Math.abs(quotePrice/market.price-1)<=.05;
+  return quotePrice>0 && Number.isFinite(quotePrice) && Math.abs(quotePrice/market.price-1)<=.05 ? quotePrice : null;
 }
 const marketReasons = {
   "not-indexed":"DEX-haku ei palauttanut tokenille poolia",
@@ -89,17 +89,26 @@ export async function scanPrices(markets, signal) {
 }
 
 export function mintEligible(account) {
-  const data = account?.data?.parsed;
-  if (data?.type !== "mint" || data.info?.isInitialized !== true ||
-      data.info.mintAuthority !== null || data.info.freezeAuthority !== null) return false;
-  if (account.owner === classicTokenProgram) return true;
-  // Token-2022 allows extensions that can freeze or change balances. Only the
-  // two metadata extensions are admitted. RugCheck still validates metadata risks.
-  return account.owner === tokenProgram2022 && Array.isArray(data.info.extensions) &&
-    data.info.extensions.every(row => ["metadataPointer","tokenMetadata"].includes(row?.extension));
+  return mintVerification(account).ok === true;
 }
 
-export async function scanMints(tokens, signal) {
+function mintVerification(account) {
+  if (!account) return {ok:null,reason:"Minttitili puuttuu vahvistetusta RPC-vastauksesta"};
+  const data = account?.data?.parsed;
+  if (data?.type !== "mint" || data.info?.isInitialized !== true)
+    return {ok:false,reason:"SPL-minttitili on alustamaton tai virheellinen"};
+  if (data.info.mintAuthority !== null) return {ok:false,reason:"Minttausvaltuus on aktiivinen tai tuntematon"};
+  if (data.info.freezeAuthority !== null) return {ok:false,reason:"Jäädytysvaltuus on aktiivinen tai tuntematon"};
+  if (account.owner === classicTokenProgram) return {ok:true};
+  if (account.owner !== tokenProgram2022) return {ok:false,reason:"Mintin omistava ohjelma ei ole tuettu SPL Token"};
+  // Token-2022 allows extensions that can freeze or change balances. Only the
+  // two metadata extensions are admitted. RugCheck still validates metadata risks.
+  if (!Array.isArray(data.info.extensions)) return {ok:false,reason:"Token-2022-laajennusten tiedot puuttuvat"};
+  const unsupported=data.info.extensions.filter(row=>!["metadataPointer","tokenMetadata"].includes(row?.extension));
+  return unsupported.length ? {ok:false,reason:`Token-2022-riskilaajennus: ${unsupported.map(row=>row?.extension??"tuntematon").join(", ").slice(0,160)}`} : {ok:true};
+}
+
+export async function scanMints(tokens, signal, detail = false) {
   if (!tokens.length) return new Map();
   const response = await rpcCall("getMultipleAccounts", [tokens, {
     commitment: "confirmed", encoding: "jsonParsed"
@@ -107,7 +116,8 @@ export async function scanMints(tokens, signal) {
   if (!Array.isArray(response?.value) || response.value.length !== tokens.length) {
     throw new Error("Virheellinen minttien riskitarkistus.");
   }
-  return new Map(tokens.map((token, i) => [token, response.value[i] ? mintEligible(response.value[i]) : null]));
+  return new Map(tokens.map((token,i)=>[token,
+    detail ? mintVerification(response.value[i]) : mintEligible(response.value[i])]));
 }
 
 export function rugEligible(report, ceiling) {
@@ -712,11 +722,11 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
       for(const token of needMint)mintPending.add(token);
       void (async()=>{try {
         if(!needMint.length)return;
-        const checked = await scanMints(needMint, signal);
+        const checked = await scanMints(needMint,signal,true);
         if (signal.aborted) return;
         for (const token of needMint) {
-          const ok=checked.get(token);
-          mintCache.set(token,{ok,expires:Date.now()+(ok==null?12000:300000)});
+          const result=checked.get(token);
+          mintCache.set(token,{...result,expires:Date.now()+(result.ok==null?12000:300000)});
         }
         for (const { item } of verificationCandidates) if (needMint.includes(item.token)) wake(item);
       } catch (error) {
@@ -800,11 +810,13 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
       if (signal.aborted) return;
       const candidates = [];
       for (const { item, pair, decision, quality, strategy, profile } of ranked) {
-        const authority = mintCache.get(item.token)?.ok;
+        const mintReport=mintCache.get(item.token);
+        const authority = mintReport?.ok;
         const report = rugCache.get(item.token);
         const rug = rugCeiling > 0 ? report?.ok : true;
         const cachedRoute = pair && policy.strategy >= 5 ? routeCache.get(positionKey(pair.market)) : null;
         let route = cachedRoute?.expires > Date.now() ? cachedRoute : null;
+        let quotePrice;
         const pool = pair && poolCache.get(positionKey(pair.market));
         let checked = decision;
         let stage = strategy?.code === "liquidity-floor" ? "liquidity" : pair ? "momentum" : "market";
@@ -824,9 +836,9 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
             reason:decision==="approve"?undefined:reason,provider});
         }
         if (decision === "approve") {
-          if (authority === false) { stage = "mint"; checked = "reject"; reason = "Mintin omistaja tai minttaus-/jäädytysvaltuus"; }
+          if (authority === false) { stage = "mint"; checked = "reject"; reason = mintReport.reason; }
           else if (rug === false) { stage = "rug"; checked = "reject"; reason = report.reason || "RugCheck hylkäsi"; }
-          else if (authority !== true || rug !== true) { stage = authority !== true ? "mint" : "rug"; checked = "watch"; reason = report?.reason || "Odotetaan turvallisuustarkistusta"; }
+          else if (authority !== true || rug !== true) { stage = authority !== true ? "mint" : "rug"; checked = "watch"; reason = (stage==="mint"?mintReport?.reason:report?.reason) || "Odotetaan turvallisuustarkistusta"; }
           else if (policy.strategy >= 5) {
             if (momentum) {
               if (pool?.status !== "approve" || pool.expires <= Date.now()) {
@@ -844,7 +856,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
                   if (depth.status === "reject" || depth.status === "watch") {
                     checked=depth.status;
                     reason=depth.reason;
-                  } else if (!routeMatchesMarket(route,pair.market,pool)) {
+                  } else if (!(quotePrice=routeEntryPrice(route,pair.market,pool))) {
                     checked="watch";
                     reason="Jupiterin tarjoushinta ei täsmää analysoituun pooliin tai mintin desimaalit puuttuvat";
                   } else {
@@ -866,7 +878,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         if (momentum && pair && authority === true && rug === true && pool?.status === "approve" &&
             pool.expires>Date.now() && route?.status === "approve") {
           const depth=assessEntryDepth(pool,pair.market,route.orderUsd,route.solUsd,policy[profile+"MaxImpact"]??5);
-          if (depth.status === "pass" && routeMatchesMarket(route,pair.market,pool)) {
+          if (depth.status === "pass" && routeEntryPrice(route,pair.market,pool)) {
             learning.proveRoute(pair.market,route.proof,route.checkedAt);
           }
         }
@@ -898,7 +910,7 @@ export async function runScanner({ engine, policy, rules, timeframe, copyWallets
         }
         if (checked === "approve") {
           if (route) item.due = Math.min(item.due, route.expires);
-          candidates.push({ ...pair.market, provider:pair.provider, decimals:poolTokenDecimals(pool,item.token), score: strategy?.score, scoreFloor: strategy?.scoreFloor, track: strategy?.track, segment:strategy?.segment, features:strategy?.features, shortVolume: strategy?.shortVolume, analysisReason: strategy?.reason, verification: reason, tradeStrategy: policy.strategy === 8 ? 8 : policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: pair.observedAt, priority: item.priority, routeExpires: route?.expires, signalAt: route?.checkedAt, entryImpactPct: route?.entryImpactPct });
+          candidates.push({ ...pair.market, provider:pair.provider, decimals:poolTokenDecimals(pool,item.token), score: strategy?.score, scoreFloor: strategy?.scoreFloor, track: strategy?.track, segment:strategy?.segment, features:strategy?.features, shortVolume: strategy?.shortVolume, analysisReason: strategy?.reason, verification: reason, tradeStrategy: policy.strategy === 8 ? 8 : policy.strategy >= 5 ? (profile === "sniper" ? 6 : 5) : policy.strategy, at: pair.observedAt, priority: item.priority, routeExpires: route?.expires, signalAt: route?.checkedAt, entryImpactPct: route?.entryImpactPct, entryQuotePrice:quotePrice });
         }
       }
       const previousApproval = new Map(approvedTicks.map(tick => [positionKey(tick), tick.signalAt]));

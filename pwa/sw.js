@@ -1,4 +1,4 @@
-const cacheName = "screener-paper-v43";
+const cacheName = "screener-paper-v44";
 const files = ["./", "./index.html", "./app.js", "./dashboard-nav.js", "./visual-rules.js", "./live-adapter.js", "./network.js", "./wallet-standard.js", "./policy.js", "./markets.js", "./market-panel.js", "./rules.js", "./copy.js", "./jupiter.js", "./scanner.js", "./market-tape.js", "./market-resolver.js", "./pool-stream.js", "./candidate-analyst.js", "./analyst-worker.js", "./momentum.js", "./momentum-learning.js", "./paper-signal-model.js", "./agent-dashboard.js", "./trojan-analysis.js", "./trojan-discovery.js", "./trojan-entry.js", "./trojan-pools.js", "./trojan-security.js", "./devnet.js", "./style.css", "./engine.wasm", "./manifest.webmanifest",
   "./icon-192.png", "./icon-512.png", "./LICENSE"];
 

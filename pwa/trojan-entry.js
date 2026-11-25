@@ -40,7 +40,7 @@ function quoteRequest({ signal, apiKey, slippageBps, requestQuote }) {
       ? out * BigInt(10000-slippageBps)/10000n : integer(quote?.otherAmountThreshold);
     if (quote?.inputMint !== inputMint || quote.outputMint !== outputMint || integer(quote.inAmount) !== quantity ||
         out === null || min === null || min <= 0n || min > out || min < out*BigInt(10000-slippageBps)/10000n) {
-      const error = new Error(quote?.errorMessage ?? "Jupiter-tarjous ei vastaa pyyntöä");
+      const error = new Error(String(quote?.errorMessage ?? "Jupiter-tarjous ei vastaa pyyntöä").slice(0,220));
       throw error;
     }
     return {quote,out};
@@ -71,8 +71,10 @@ export async function analyzeEntryRoute(token, usd, { signal, apiKey, taker, sli
   if (!quality.allowed) return quality;
   if (checkExit) {
     const reverse = await request(token,mint,out);
-    if (reverse.quote.transaction || !routeQuality(reverse.quote).allowed) {
-      return { ...quality, allowed: false, reason: "Jupiterin myyntireitti hylättiin" };
+    const exit=routeQuality(reverse.quote);
+    if (reverse.quote.transaction || !exit.allowed) {
+      return { ...quality, allowed:false, reason:`Jupiter-myyntireitti: ${reverse.quote.transaction
+        ? "vastauksessa on odottamaton transaktio" : exit.reason}` };
     }
     const loss = (BigInt(amount) - reverse.out) * 10000n;
     if (loss > BigInt(amount) * 500n) {

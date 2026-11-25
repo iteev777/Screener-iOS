@@ -115,6 +115,7 @@ test("Momentum can buy on observed short volume without a daily volume field",()
   const settings={...policy,strategy:8};
   assert.equal(run(newPortfolio(),[entry],settings).trades.length,1);
   assert.equal(run(newPortfolio(),[{...entry,shortVolume:undefined}],settings).trades.length,0);
+  assert.equal(run(newPortfolio(),[{...entry,entryQuotePrice:102}],settings).trades[0].price,102);
 });
 
 test("a failed sell quote leaves a marked Paper position open and a validated quote bounds its fill",()=>{
